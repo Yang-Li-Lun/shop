@@ -1,0 +1,75 @@
+{
+  "enabled": true,
+  "targetPackage": "com.shopee.tw",
+  "matchThreshold": 0.75,
+  "circleXThreshold": 0.85,
+  "scanIntervalMs": 900,
+  "clickCooldownMs": 2000,
+  "randomClickMaxMs": 1500,
+  "showClickMarker": true,
+  "numberMonitorEnabled": true,
+  "numberMonitorThreshold": 0.19,
+  "numberMonitorUpperLimit": 3.0,
+  "numberColorFilterEnabled": true,
+  "numberColorHex": "#CABC37",
+  "numberColorTolerance": 60,
+  "numberAbsenceTimeoutMs": 6000,
+  "numberTriggerZoneId": "zone-1",
+  "numberTriggerDelayMs": 6000,
+  "numberMonitorRegion": {
+    "left": 0.68,
+    "top": 0.22600001,
+    "right": 0.795,
+    "bottom": 0.35
+  },
+  "zones": [
+    {
+      "id": "zone-1",
+      "name": "領取",
+      "left": 0.6620370149612427,
+      "top": 0.23888888955116272,
+      "right": 1.0,
+      "bottom": 0.36851853132247925,
+      "targets": [
+        {
+          "id": "zone-1-text-1228478",
+          "mode": "TEXT",
+          "value": "領取",
+          "label": "領取"
+        }
+      ]
+    },
+    {
+      "id": "zone-1787586919928-4",
+      "name": "圓圈＋X",
+      "left": 0.3878205120563507,
+      "top": 0.4962962865829468,
+      "right": 0.6086182594299316,
+      "bottom": 0.8361111283302307,
+      "targets": [
+        {
+          "id": "zone-1787586919928-4-circle-x",
+          "mode": "CIRCLE_X",
+          "value": "circle_x",
+          "label": "圓圈＋X"
+        }
+      ]
+    },
+    {
+      "id": "zone-1787654151600-1",
+      "name": "返回",
+      "left": 0.0,
+      "top": 0.0,
+      "right": 0.2471509873867035,
+      "bottom": 0.13425925374031067,
+      "targets": [
+        {
+          "id": "zone-1787654151600-1-back-arrow",
+          "mode": "BACK_ARROW",
+          "value": "back_arrow",
+          "label": "返回箭頭"
+        }
+      ]
+    }
+  ]
+}

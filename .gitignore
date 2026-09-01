@@ -1,0 +1,11 @@
+*.iml
+.gradle/
+/local.properties
+/.idea/
+/.jdk/
+/build/
+/app/build/
+/captures/
+$work/*.dex
+tools/selector-fix/*.class
+tools/selector-fix/*.jar

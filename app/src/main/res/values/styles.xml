@@ -1,0 +1,11 @@
+<?xml version="1.0" encoding="utf-8"?>
+<resources>
+    <style name="Theme.CSC" parent="android:style/Theme.Material.Light.NoActionBar">
+        <item name="android:fontFamily">sans</item>
+        <item name="android:windowLightStatusBar">true</item>
+        <item name="android:statusBarColor">@color/csc_surface</item>
+        <item name="android:navigationBarColor">@color/csc_surface</item>
+        <item name="android:colorAccent">@color/csc_primary</item>
+        <item name="android:windowBackground">@color/csc_surface</item>
+    </style>
+</resources>
