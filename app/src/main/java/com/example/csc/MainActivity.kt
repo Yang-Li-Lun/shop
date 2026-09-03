@@ -96,7 +96,7 @@ class MainActivity : Activity() {
     private val captureStartTimeoutRunnable = Runnable {
         if (projectionAuthorizationGate.onStartTimeout()) {
             refreshStatus()
-            toast("螢幕擷取服務未在 5 秒內啟動，請重新關閉再開啟自動辨識")
+            toast("螢幕擷取啟動逾時，請重開自動辨識。")
         }
     }
     private var numberTriggerZoneIds = listOf<String?>()
@@ -149,12 +149,12 @@ class MainActivity : Activity() {
                 AutomationConfig.setEnabled(this, true)
                 setSwitchWithoutCallback(true)
                 refreshStatus()
-                toast("螢幕擷取已允許；現在切換到目標 App")
+                toast("已允許螢幕擷取，請切換到目標 App。")
             } else {
                 projectionAuthorizationGate.onAuthorizationResult(granted = false)
                 AutomationConfig.setEnabled(this, false)
                 setSwitchWithoutCallback(false)
-                toast("未允許螢幕擷取，無法在 Android 10 進行像素辨識")
+                toast("未允許螢幕擷取。")
             }
             return
         }
@@ -197,10 +197,11 @@ class MainActivity : Activity() {
         scroll.addView(root, matchWidth())
 
         root.addView(text("CSC", 30f, ON_SURFACE, Typeface.BOLD))
-        root.addView(text("多區域辨識螢幕目標，自動點擊命中位置", 15f, MUTED).apply {
-            setPadding(0, dp(4), 0, 0)
-        })
-        root.addView(space(22))
+        dailyTriggerStatsText = text("", 14f, PRIMARY, Typeface.BOLD).apply {
+            setPadding(0, dp(6), 0, dp(8))
+        }
+        root.addView(dailyTriggerStatsText, matchWidth())
+        root.addView(space(8))
 
         val statusCard = card().apply {
             orientation = LinearLayout.HORIZONTAL
@@ -212,14 +213,14 @@ class MainActivity : Activity() {
                 setColor(PRIMARY)
             }
         }, LinearLayout.LayoutParams(dp(12), dp(12)).apply { marginEnd = dp(12) })
-        statusText = text("檢查服務狀態…", 15f, ON_SURFACE, Typeface.BOLD)
+        statusText = text("檢查中…", 15f, ON_SURFACE, Typeface.BOLD)
         statusCard.addView(statusText, LinearLayout.LayoutParams(0, ViewGroup.LayoutParams.WRAP_CONTENT, 1f))
         root.addView(statusCard)
 
-        root.addView(button("1. 開啟無障礙服務").apply {
+        root.addView(button("1. 開啟無障礙").apply {
             setOnClickListener {
                 startActivity(Intent(Settings.ACTION_ACCESSIBILITY_SETTINGS))
-                toast("請選擇「CSC」並允許")
+                toast("請選擇「CSC」並允許。")
             }
         }, matchWidth())
         root.addView(space(14))
@@ -231,8 +232,8 @@ class MainActivity : Activity() {
         }
         activationCard.addView(LinearLayout(this).apply {
             orientation = LinearLayout.VERTICAL
-            addView(text("啟用自動辨識", 18f, ON_PRIMARY_CONTAINER, Typeface.BOLD))
-            automationStateText = text("目前關閉", 13f, ON_PRIMARY_CONTAINER)
+            addView(text("自動辨識", 18f, ON_PRIMARY_CONTAINER, Typeface.BOLD))
+            automationStateText = text("已關閉", 13f, ON_PRIMARY_CONTAINER)
             addView(automationStateText)
         }, LinearLayout.LayoutParams(0, ViewGroup.LayoutParams.WRAP_CONTENT, 1f))
         automationSwitch = Switch(this).apply {
@@ -240,7 +241,7 @@ class MainActivity : Activity() {
         }
         activationCard.addView(automationSwitch)
         root.addView(activationCard, matchWidth())
-        root.addView(text("允許自動化的目標 App 套件", 14f, MUTED, Typeface.BOLD).apply {
+        root.addView(text("目標 App 套件", 14f, MUTED, Typeface.BOLD).apply {
             setPadding(0, dp(12), 0, 0)
         })
         targetPackageInput = EditText(this).apply {
@@ -255,19 +256,19 @@ class MainActivity : Activity() {
             })
         }
         root.addView(targetPackageInput, matchWidth())
-        root.addView(text("只有此前景 App 可以截圖、辨識、點擊或滑動；其他 App 一律暫停。", 13f, MUTED))
+        root.addView(text("僅在此 App 前景執行。", 13f, MUTED))
         root.addView(space(14))
 
-        val zonesSection = collapsibleSection(root, "2. 多區域與辨識項目")
-        zonesSection.addView(text("一般區域可設定文字或圖片；圓圈＋X與返回箭頭為獨立圖形辨識，不使用參考圖片。", 14f, MUTED).apply {
+        val zonesSection = collapsibleSection(root, "2. 辨識區域")
+        zonesSection.addView(text("支援文字、圖片與內建圖形。", 14f, MUTED).apply {
             setPadding(dp(2), 0, dp(2), dp(12))
         })
         zonesContainer = LinearLayout(this).apply { orientation = LinearLayout.VERTICAL }
         zonesSection.addView(zonesContainer, matchWidth())
-        zonesSection.addView(button("新增辨識區域").apply {
+        zonesSection.addView(button("新增區域").apply {
             setOnClickListener {
                 if (zoneEditors.size >= AutomationConfig.MAX_ZONES) {
-                    toast("最多可建立 ${AutomationConfig.MAX_ZONES} 個辨識區域")
+                     toast("最多 ${AutomationConfig.MAX_ZONES} 個區域。")
                     return@setOnClickListener
                 }
                 addZoneEditor(
@@ -283,7 +284,7 @@ class MainActivity : Activity() {
         }, matchWidth())
 
         root.addView(space(10))
-        val numberSection = collapsibleSection(root, "3. 數字監控與自動滑動")
+        val numberSection = collapsibleSection(root, "3. 數字監控與上滑")
         val numberMonitorCard = card()
         val numberMonitorRow = LinearLayout(this).apply {
             orientation = LinearLayout.HORIZONTAL
@@ -291,21 +292,14 @@ class MainActivity : Activity() {
         }
         numberMonitorRow.addView(LinearLayout(this).apply {
             orientation = LinearLayout.VERTICAL
-            addView(text("啟用獨立數字監控", 16f, ON_SURFACE, Typeface.BOLD))
-            addView(text("數字在門檻範圍內時停留；無數字達設定秒數、超過上限或所選區域點擊後會向上滑", 13f, MUTED))
+            addView(text("數字監控", 16f, ON_SURFACE, Typeface.BOLD))
+            addView(text("範圍內停留；低於門檻、超過上限或逾時未辨識時上滑。", 13f, MUTED))
         }, LinearLayout.LayoutParams(0, ViewGroup.LayoutParams.WRAP_CONTENT, 1f))
         numberMonitorSwitch = Switch(this).apply {
             setOnCheckedChangeListener { _, _ -> saveSettings() }
         }
         numberMonitorRow.addView(numberMonitorSwitch)
         numberMonitorCard.addView(numberMonitorRow, matchWidth())
-        dailyTriggerStatsText = text("", 14f, PRIMARY, Typeface.BOLD).apply {
-            setPadding(0, dp(14), 0, dp(4))
-        }
-        numberMonitorCard.addView(dailyTriggerStatsText, matchWidth())
-        numberMonitorCard.addView(
-            text("只統計所選區域點擊後，實際完成的優先上滑；取消或失敗不計。", 13f, MUTED),
-        )
         numberMonitorCard.addView(text("停留門檻", 14f, MUTED, Typeface.BOLD).apply {
             setPadding(0, dp(16), 0, 0)
         })
@@ -321,8 +315,8 @@ class MainActivity : Activity() {
             })
         }
         numberMonitorCard.addView(numberMonitorThresholdInput, matchWidth())
-        numberMonitorCard.addView(text("只採用最接近監控框中心的 OCR 行與第一個數值；大於此值時停留。", 13f, MUTED))
-        numberMonitorCard.addView(text("數字上限", 14f, MUTED, Typeface.BOLD).apply {
+        numberMonitorCard.addView(text("達門檻時停留。", 13f, MUTED))
+        numberMonitorCard.addView(text("上限", 14f, MUTED, Typeface.BOLD).apply {
             setPadding(0, dp(14), 0, 0)
         })
         numberMonitorUpperLimitInput = EditText(this).apply {
@@ -337,13 +331,13 @@ class MainActivity : Activity() {
             })
         }
         numberMonitorCard.addView(numberMonitorUpperLimitInput, matchWidth())
-        numberMonitorCard.addView(text("數字超過上限時，連續兩幀確認後上滑；設為 999999 等同不限制。", 13f, MUTED))
+        numberMonitorCard.addView(text("超過時上滑；999999 = 不限制。", 13f, MUTED))
         val colorFilterRow = LinearLayout(this).apply {
             orientation = LinearLayout.HORIZONTAL
             gravity = Gravity.CENTER_VERTICAL
             setPadding(0, dp(14), 0, 0)
         }
-        colorFilterRow.addView(text("限制數字顏色", 14f, MUTED, Typeface.BOLD), LinearLayout.LayoutParams(0, dp(48), 1f))
+        colorFilterRow.addView(text("限制顏色", 14f, MUTED, Typeface.BOLD), LinearLayout.LayoutParams(0, dp(48), 1f))
         numberColorFilterSwitch = Switch(this).apply {
             setOnCheckedChangeListener { _, _ -> saveSettings() }
         }
@@ -372,12 +366,12 @@ class MainActivity : Activity() {
                 override fun afterTextChanged(s: Editable?) = Unit
             })
         }
-        numberMonitorCard.addView(text("顏色容許誤差（0～255）", 14f, MUTED, Typeface.BOLD).apply {
+        numberMonitorCard.addView(text("顏色誤差（0–255）", 14f, MUTED, Typeface.BOLD).apply {
             setPadding(0, dp(8), 0, 0)
         })
         numberMonitorCard.addView(numberColorToleranceInput, matchWidth())
-        numberMonitorCard.addView(text("啟用後，只有數字框內含此顏色才會算入。一般可先用 45；顏色略有差異時可提高。", 13f, MUTED))
-        numberMonitorCard.addView(text("點擊後觸發上滑的區域", 14f, MUTED, Typeface.BOLD).apply {
+        numberMonitorCard.addView(text("預設 45；漏判時可提高。", 13f, MUTED))
+        numberMonitorCard.addView(text("點擊後上滑區域", 14f, MUTED, Typeface.BOLD).apply {
             setPadding(0, dp(14), 0, 0)
         })
         numberTriggerZoneSpinner = Spinner(this)
@@ -386,8 +380,7 @@ class MainActivity : Activity() {
             override fun onItemSelected(parent: AdapterView<*>?, view: View?, position: Int, id: Long) = saveSettings()
         }
         numberMonitorCard.addView(numberTriggerZoneSpinner, matchWidth())
-        numberMonitorCard.addView(text("選擇任一自訂區域；該區域成功點擊一次後就會安排上滑。", 13f, MUTED))
-        numberMonitorCard.addView(text("觸發後等待秒數", 14f, MUTED, Typeface.BOLD).apply {
+        numberMonitorCard.addView(text("點擊後等待（秒）", 14f, MUTED, Typeface.BOLD).apply {
             setPadding(0, dp(14), 0, 0)
         })
         numberTriggerWaitSecondsInput = EditText(this).apply {
@@ -402,8 +395,8 @@ class MainActivity : Activity() {
             })
         }
         numberMonitorCard.addView(numberTriggerWaitSecondsInput, matchWidth())
-        numberMonitorCard.addView(text("可設定 0～30 秒；0 代表點擊成功後立刻安排上滑。", 13f, MUTED))
-        numberMonitorCard.addView(text("無數字等待秒數", 14f, MUTED, Typeface.BOLD).apply {
+        numberMonitorCard.addView(text("0 = 立即。", 13f, MUTED))
+        numberMonitorCard.addView(text("未辨識等待（秒）", 14f, MUTED, Typeface.BOLD).apply {
             setPadding(0, dp(14), 0, 0)
         })
         numberMonitorWaitSecondsInput = EditText(this).apply {
@@ -418,15 +411,15 @@ class MainActivity : Activity() {
             })
         }
         numberMonitorCard.addView(numberMonitorWaitSecondsInput, matchWidth())
-        numberMonitorCard.addView(text("可設定 0.5～30 秒；期間持續沒有數字才會上滑。", 13f, MUTED))
-        numberMonitorCard.addView(text("任一辨識區域命中文字、圖片、圓圈＋X或返回箭頭時，都會重設一般上滑倒數。點擊後的優先上滑若遇其他區域命中會先等待；辨識降低後，重新依觸發後等待秒數倒數再上滑。", 13f, MUTED).apply {
+        numberMonitorCard.addView(text("可設 0.5–30。", 13f, MUTED))
+        numberMonitorCard.addView(text("其他區域命中時暫停上滑倒數。", 13f, MUTED).apply {
             setPadding(0, dp(6), 0, 0)
         })
         numberMonitorRegionLabel = text(regionLabel(RecognitionRegion.FULL), 15f, PRIMARY, Typeface.BOLD).apply {
             setPadding(0, dp(18), 0, 0)
         }
         numberMonitorCard.addView(numberMonitorRegionLabel)
-        numberMonitorCard.addView(text("直接輸入監控區域百分比", 14f, MUTED, Typeface.BOLD).apply {
+        numberMonitorCard.addView(text("監控範圍（%）", 14f, MUTED, Typeface.BOLD).apply {
             setPadding(0, dp(10), 0, dp(4))
         })
         fun percentInput(initialValue: String): EditText = EditText(this).apply {
@@ -465,7 +458,7 @@ class MainActivity : Activity() {
         listOf(numberMonitorLeftInput, numberMonitorTopInput, numberMonitorRightInput, numberMonitorBottomInput)
             .forEach { it.addTextChangedListener(percentWatcher) }
         numberMonitorCard.addView(percentRow, matchWidth())
-        numberMonitorCard.addView(text("監控區域預設鎖定；調整時只拖曳四個角點。", 13f, MUTED).apply {
+        numberMonitorCard.addView(text("按「調整」後拖曳四角。", 13f, MUTED).apply {
             setPadding(0, dp(6), 0, dp(6))
         })
         numberMonitorSelector = RegionSelectorView(this).apply {
@@ -478,22 +471,22 @@ class MainActivity : Activity() {
             }
         }
         numberMonitorCard.addView(numberMonitorSelector, matchWidth())
-        val numberMonitorAdjustButton = button("調整數字監控區域")
+        val numberMonitorAdjustButton = button("調整監控範圍")
         numberMonitorAdjustButton.setOnClickListener {
             val editing = !numberMonitorSelector.isEnabled
             numberMonitorSelector.isEnabled = editing
             numberMonitorSelector.invalidate()
-            numberMonitorAdjustButton.text = if (editing) "完成調整" else "調整數字監控區域"
+            numberMonitorAdjustButton.text = if (editing) "完成" else "調整監控範圍"
         }
         numberMonitorCard.addView(numberMonitorAdjustButton, matchWidth())
         numberMonitorCard.addView(space(8))
-        numberMonitorCard.addView(button("恢復全螢幕").apply {
+        numberMonitorCard.addView(button("設為全螢幕").apply {
             setOnClickListener { numberMonitorSelector.setRegion(RecognitionRegion.FULL, notify = true) }
         }, matchWidth())
         numberSection.addView(numberMonitorCard)
 
         root.addView(space(10))
-        val tuningSection = collapsibleSection(root, "4. 調整與啟動")
+        val tuningSection = collapsibleSection(root, "4. 辨識調整")
         val tuningCard = card()
         thresholdLabel = text("圖片相似度：82%", 15f, ON_SURFACE, Typeface.BOLD)
         tuningCard.addView(thresholdLabel)
@@ -507,7 +500,7 @@ class MainActivity : Activity() {
             })
         }
         tuningCard.addView(thresholdSeek, matchWidth())
-        tuningCard.addView(text("套用到所有區域的參考圖片。誤點時調高，找不到時調低。", 13f, MUTED))
+        tuningCard.addView(text("誤點調高；漏判調低。", 13f, MUTED))
         tuningCard.addView(space(18))
         circleXThresholdLabel = text("圓圈＋X 命中門檻：88%", 15f, ON_SURFACE, Typeface.BOLD)
         tuningCard.addView(circleXThresholdLabel)
@@ -521,7 +514,7 @@ class MainActivity : Activity() {
             })
         }
         tuningCard.addView(circleXThresholdSeek, matchWidth())
-        tuningCard.addView(text("圓圈＋X累積 16 筆背景後會在 -3%～+5% 內安全微調。所有圖形命中都會用第二幀確認位置與大小。", 13f, MUTED))
+        tuningCard.addView(text("累積 16 筆背景後自動微調；圖形需二次確認。", 13f, MUTED))
         backArrowThresholdLabel = text("返回箭頭命中門檻：72%", 15f, ON_SURFACE, Typeface.BOLD)
         tuningCard.addView(backArrowThresholdLabel)
         backArrowThresholdSeek = SeekBar(this).apply {
@@ -547,9 +540,8 @@ class MainActivity : Activity() {
             })
         }
         tuningCard.addView(cooldownSeek, matchWidth())
-        tuningCard.addView(text("任一項目點擊後至少等待這段時間才會再次點擊。", 13f, MUTED))
         tuningCard.addView(space(18))
-        randomClickTimeLabel = text("隨機點擊時間上限：500 毫秒", 15f, ON_SURFACE, Typeface.BOLD)
+        randomClickTimeLabel = text("點擊隨機延遲：500 毫秒", 15f, ON_SURFACE, Typeface.BOLD)
         tuningCard.addView(randomClickTimeLabel)
         randomClickTimeSeek = SeekBar(this).apply {
             min = 1
@@ -561,7 +553,6 @@ class MainActivity : Activity() {
             })
         }
         tuningCard.addView(randomClickTimeSeek, matchWidth())
-        tuningCard.addView(text("所有區域共用；命中後等待時間與按住時間會各自在此上限內隨機產生。", 13f, MUTED))
         tuningCard.addView(space(18))
         val markerRow = LinearLayout(this).apply {
             orientation = LinearLayout.HORIZONTAL
@@ -569,8 +560,8 @@ class MainActivity : Activity() {
         }
         markerRow.addView(LinearLayout(this).apply {
             orientation = LinearLayout.VERTICAL
-            addView(text("顯示點擊位置", 15f, ON_SURFACE, Typeface.BOLD))
-            addView(text("成功點擊後短暫顯示紫色小圓點", 13f, MUTED))
+            addView(text("點擊位置", 15f, ON_SURFACE, Typeface.BOLD))
+            addView(text("點擊後顯示紫點。", 13f, MUTED))
         }, LinearLayout.LayoutParams(0, ViewGroup.LayoutParams.WRAP_CONTENT, 1f))
         showClickMarkerSwitch = Switch(this).apply {
             setOnCheckedChangeListener { _, _ -> saveSettings() }
@@ -580,7 +571,7 @@ class MainActivity : Activity() {
         tuningSection.addView(tuningCard)
         tuningSection.addView(space(2))
 
-        tuningSection.addView(text("安全提醒：請勿用於付款、金融交易、驗證碼或其他不可逆操作。可隨時從通知列按「立即停止」。", 13f, ERROR).apply {
+        tuningSection.addView(text("請勿用於付款、驗證碼等不可逆操作；可從通知列停止。", 13f, ERROR).apply {
             setPadding(dp(4), dp(18), dp(4), 0)
         })
         root.requestFocus()
@@ -627,16 +618,15 @@ class MainActivity : Activity() {
 
     private fun refreshDailyTriggerStats() {
         if (!::dailyTriggerStatsText.isInitialized) return
-        val todayDate = LocalDate.now().toString()
-        val todayCount = DailyTriggerStats.today(this)
-        val history = DailyTriggerStats.recent(this, 7)
-            .filter { it.date != todayDate }
-            .take(6)
-            .joinToString("　") { "${it.date.takeLast(5)}：${it.count}" }
-        dailyTriggerStatsText.text = buildString {
-            append("今日點擊後上滑：${todayCount} 次")
-            if (history.isNotBlank()) append("\n最近：").append(history)
-        }
+        val counts = DailyTriggerStats.lastThreeDays(this, LocalDate.now())
+        dailyTriggerStatsText.text = counts.mapIndexed { index, item ->
+            val label = when (index) {
+                0 -> "今日"
+                1 -> "昨日"
+                else -> "前日"
+            }
+            "$label ${item.count} 次"
+        }.joinToString("　")
     }
 
     private fun addZoneEditor(zone: RecognitionZone) {
@@ -671,23 +661,23 @@ class MainActivity : Activity() {
             setText(normalized.targets.filter { it.mode == TargetMode.TEXT }.joinToString("\n") { it.value })
         }
         val imagesContainer = LinearLayout(this).apply { orientation = LinearLayout.VERTICAL }
-        val addImageButton = button("加入參考圖片（可多選）")
+        val addImageButton = button("加入圖片")
         if (circleXOnly) {
-            card.addView(text("圓圈＋X 專用辨識", 16f, PRIMARY, Typeface.BOLD).apply {
+            card.addView(text("圓圈＋X", 16f, PRIMARY, Typeface.BOLD).apply {
                 setPadding(0, dp(12), 0, dp(4))
             })
-            card.addView(text("直接分析完整圓環與中心交叉線，不讀取圖片；使用下方可調的共用圖形命中門檻。", 13f, MUTED))
+            card.addView(text("內建圖形辨識，不需參考圖片。", 13f, MUTED))
         } else if (backArrowOnly) {
-            card.addView(text("返回箭頭專用辨識", 16f, PRIMARY, Typeface.BOLD).apply {
+            card.addView(text("返回箭頭", 16f, PRIMARY, Typeface.BOLD).apply {
                 setPadding(0, dp(12), 0, dp(4))
             })
-            card.addView(text("直接分析白色向左箭頭的方向、雙斜線與周邊隔離，不讀取參考圖片；使用下方可調的共用圖形命中門檻。", 13f, MUTED))
+            card.addView(text("內建圖形辨識，不需參考圖片。", 13f, MUTED))
         } else {
-            card.addView(text("文字項目（一行一個）", 14f, MUTED, Typeface.BOLD).apply {
+            card.addView(text("文字（一行一個）", 14f, MUTED, Typeface.BOLD).apply {
                 setPadding(0, dp(12), 0, 0)
             })
             card.addView(textInput, matchWidth())
-            card.addView(text("參考圖片項目", 14f, MUTED, Typeface.BOLD).apply {
+            card.addView(text("參考圖片", 14f, MUTED, Typeface.BOLD).apply {
                 setPadding(0, dp(12), 0, dp(6))
             })
             card.addView(imagesContainer, matchWidth())
@@ -699,7 +689,7 @@ class MainActivity : Activity() {
             setPadding(0, dp(18), 0, 0)
         }
         card.addView(regionLabel)
-        card.addView(text("直接輸入辨識區域百分比", 14f, MUTED, Typeface.BOLD).apply {
+        card.addView(text("辨識範圍（%）", 14f, MUTED, Typeface.BOLD).apply {
             setPadding(0, dp(10), 0, dp(4))
         })
         val zonePercentRow = LinearLayout(this).apply { orientation = LinearLayout.HORIZONTAL }
@@ -723,7 +713,7 @@ class MainActivity : Activity() {
             })
         }
         card.addView(zonePercentRow, matchWidth())
-        card.addView(text("區域預設鎖定。按下調整後，只有四個角點可拖曳。", 13f, MUTED).apply {
+        card.addView(text("按「調整」後拖曳四角。", 13f, MUTED).apply {
             setPadding(0, dp(6), 0, dp(6))
         })
         val selector = RegionSelectorView(this).apply {
@@ -731,10 +721,10 @@ class MainActivity : Activity() {
             setRegion(normalized.region)
         }
         card.addView(selector, matchWidth())
-        val adjustButton = button("調整辨識區域")
+        val adjustButton = button("調整範圍")
         card.addView(adjustButton, matchWidth())
         card.addView(space(8))
-        card.addView(button("恢復全螢幕").apply {
+        card.addView(button("設為全螢幕").apply {
             setOnClickListener { selector.setRegion(RecognitionRegion.FULL, notify = true) }
         }, matchWidth())
 
@@ -805,12 +795,12 @@ class MainActivity : Activity() {
             val editing = !selector.isEnabled
             selector.isEnabled = editing
             selector.invalidate()
-            adjustButton.text = if (editing) "完成調整" else "調整辨識區域"
+            adjustButton.text = if (editing) "完成" else "調整範圍"
         }
         addImageButton.setOnClickListener { chooseReferenceImages(editor.zoneId) }
         deleteButton.setOnClickListener {
             if (zoneEditors.size == 1) {
-                toast("至少需要保留一個辨識區域")
+                toast("至少保留一個區域。")
                 return@setOnClickListener
             }
             zoneEditors.remove(editor)
@@ -991,7 +981,7 @@ class MainActivity : Activity() {
     private fun refreshNumberTriggerZoneChoices(selectedZoneId: String?) {
         if (!::numberTriggerZoneSpinner.isInitialized) return
         val choices = listOf(null) + zoneEditors.map { it.zoneId }
-        val labels = listOf("不使用區域點擊觸發") + zoneEditors.mapIndexed { index, editor ->
+        val labels = listOf("不使用") + zoneEditors.mapIndexed { index, editor ->
             "${index + 1}. ${editor.nameInput.text.toString().trim().ifBlank { "未命名區域" }}"
         }
         numberTriggerZoneIds = choices
@@ -1006,17 +996,17 @@ class MainActivity : Activity() {
             val targetPackage = targetPackageInput.text.toString().trim()
             if (!isValidTargetPackage(targetPackage) || targetPackage == packageName) {
                 setSwitchWithoutCallback(false)
-                toast("請先輸入有效且不是 CSC 的目標 App 套件")
+                toast("請輸入有效的目標 App 套件。")
                 return
             }
             if (collectZones().none { it.targets.isNotEmpty() }) {
                 setSwitchWithoutCallback(false)
-                toast("請先在任一區域加入文字或參考圖片")
+                toast("請先加入辨識項目。")
                 return
             }
             if (!AutomationConfig.isAccessibilityServiceEnabled(this)) {
                 AutomationConfig.setEnabled(this, true)
-                toast("已要求啟用；請開啟 CSC 無障礙服務")
+                toast("請選擇「CSC」並允許。")
                 startActivity(Intent(Settings.ACTION_ACCESSIBILITY_SETTINGS))
                 return
             }
@@ -1034,7 +1024,7 @@ class MainActivity : Activity() {
         }
         ScreenAutomationService.requestImmediateRefresh()
         refreshStatus()
-        if (enabled) toast("已啟用；現在切換到目標 App")
+        if (enabled) toast("已啟用，請切換到目標 App。")
     }
 
     private fun setSwitchWithoutCallback(value: Boolean) {
@@ -1054,22 +1044,13 @@ class MainActivity : Activity() {
         }
         statusText.text = when {
             Build.VERSION.SDK_INT < 30 && MediaProjectionCaptureService.running && ScreenAutomationService.connected ->
-                "服務與螢幕擷取已連線，可以開始辨識"
-            ScreenAutomationService.connected -> "服務已連線，可以開始辨識"
-            systemEnabled -> "服務已允許，正在等待系統連線"
-            else -> "尚未開啟無障礙服務"
+                "服務已連線"
+            ScreenAutomationService.connected -> "服務已連線"
+            systemEnabled -> "等待服務連線"
+            else -> "請開啟無障礙"
         }
         if (::automationStateText.isInitialized) {
-            automationStateText.text = when {
-                !settings.enabled -> "目前關閉"
-                !isValidTargetPackage(settings.targetPackage) || settings.targetPackage == packageName ->
-                    "已要求啟用；等待設定有效目標 App"
-                !systemEnabled -> "已要求啟用；等待無障礙服務"
-                !ScreenAutomationService.connected -> "已要求啟用；等待服務實際連線"
-                Build.VERSION.SDK_INT < 30 && !MediaProjectionCaptureService.running ->
-                    "已要求啟用；等待螢幕擷取授權"
-                else -> "實際可運作；僅限 ${settings.targetPackage}"
-            }
+            automationStateText.text = if (settings.enabled) "已開啟" else "已關閉"
         }
     }
 

@@ -294,6 +294,56 @@ class RecognitionZoneTest {
     }
 
     @Test
+    fun splitDecimalElementsRebuildOneTightNumberToken() {
+        val tokens = rebuildNumberTokens(
+            listOf(
+                NumberTextElement("0", ClickBounds(10f, 10f, 20f, 20f)),
+                NumberTextElement(".", ClickBounds(21f, 10f, 24f, 20f)),
+                NumberTextElement("2", ClickBounds(25f, 10f, 35f, 20f)),
+                NumberTextElement("99", ClickBounds(100f, 10f, 120f, 20f)),
+            ),
+        )
+
+        assertEquals(listOf("0.2", "99"), tokens.map { it.text })
+        assertEquals(10f, tokens.first().bounds.left)
+        assertEquals(35f, tokens.first().bounds.right)
+    }
+
+    @Test
+    fun distantOrMisalignedNumberElementsAreNotMerged() {
+        val tokens = rebuildNumberTokens(
+            listOf(
+                NumberTextElement("1", ClickBounds(10f, 10f, 20f, 20f)),
+                NumberTextElement("2", ClickBounds(21f, 30f, 31f, 40f)),
+            ),
+        )
+
+        assertEquals(listOf("1", "2"), tokens.map { it.text })
+    }
+
+    @Test
+    fun mixedOcrElementsKeepNumericSubstringAndConservativeElementBounds() {
+        val tokens = rebuildNumberTokens(
+            listOf(
+                NumberTextElement("S0.2", ClickBounds(10f, 10f, 42f, 24f)),
+                NumberTextElement("幣0.2", ClickBounds(70f, 10f, 106f, 24f)),
+                NumberTextElement("0.2元", ClickBounds(134f, 10f, 170f, 24f)),
+            ),
+        )
+
+        assertEquals(listOf("0.2", "0.2", "0.2"), tokens.map { it.text })
+        assertEquals(10f, tokens.first().bounds.left)
+        assertEquals(42f, tokens.first().bounds.right)
+    }
+
+    @Test
+    fun mixedTextWithoutDigitsDoesNotCreateNumberToken() {
+        assertTrue(rebuildNumberTokens(listOf(
+            NumberTextElement("倒數", ClickBounds(10f, 10f, 30f, 24f)),
+        )).isEmpty())
+    }
+
+    @Test
     fun numberColorFilterRequiresMeaningfulCoverageInsteadOfThreePixels() {
         assertFalse(hasSufficientNumberColorCoverage(matches = 3, samples = 1_000))
         assertTrue(hasSufficientNumberColorCoverage(matches = 15, samples = 1_000))

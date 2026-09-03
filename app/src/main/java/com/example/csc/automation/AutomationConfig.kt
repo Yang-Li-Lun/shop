@@ -12,6 +12,7 @@ import kotlin.random.Random
 
 private const val MIN_NUMBER_COLOR_MATCHES = 8
 private const val MIN_NUMBER_COLOR_COVERAGE = 0.015f
+internal const val NUMBER_BOUNDARY_EPSILON = 0.000001
 internal const val NUMBER_PRIORITY_VISUAL_SCAN_INTERVAL_MS = 2_500L
 
 enum class TargetMode { TEXT, IMAGE, CIRCLE_X, BACK_ARROW }
@@ -170,9 +171,9 @@ internal fun decideNumberMonitorAction(
     upperLimit: Float = 999_999f,
 ): NumberMonitorDecision = when {
     values.isEmpty() -> NumberMonitorDecision.NO_NUMBERS
-    values.any { it > upperLimit } -> NumberMonitorDecision.SWIPE_UP
-    values.any { it > threshold } -> NumberMonitorDecision.STAY
-    values.all { it < threshold } -> NumberMonitorDecision.SWIPE_UP
+    values.any { it > upperLimit + NUMBER_BOUNDARY_EPSILON } -> NumberMonitorDecision.SWIPE_UP
+    values.any { it + NUMBER_BOUNDARY_EPSILON >= threshold } -> NumberMonitorDecision.STAY
+    values.all { it < threshold - NUMBER_BOUNDARY_EPSILON } -> NumberMonitorDecision.SWIPE_UP
     else -> NumberMonitorDecision.STAY
 }
 
@@ -180,11 +181,81 @@ internal data class NumberTextCandidate(
     val text: String,
     val centerDistanceSquared: Double,
     val area: Long,
+    val bounds: ClickBounds? = null,
+)
+
+internal data class NumberTextElement(
+    val text: String,
+    val bounds: ClickBounds,
+)
+
+internal data class NumberTextToken(
+    val text: String,
+    val bounds: ClickBounds,
+)
+
+/** Rebuilds decimal tokens when ML Kit splits a glyph sequence into separate elements. */
+internal fun rebuildNumberTokens(elements: List<NumberTextElement>): List<NumberTextToken> {
+    val orderedElements = elements
+        .flatMap { element -> numericFragments(element.text).map { element.copy(text = it) } }
+        .sortedBy { it.bounds.left }
+    if (orderedElements.isEmpty()) return emptyList()
+
+    val tokens = mutableListOf<NumberTextToken>()
+    var currentText = ""
+    var currentBounds: ClickBounds? = null
+    var previous: NumberTextElement? = null
+
+    fun flush() {
+        if (currentText.isNotBlank() && currentBounds != null) {
+            tokens += NumberTextToken(currentText, currentBounds!!)
+        }
+        currentText = ""
+        currentBounds = null
+    }
+
+    orderedElements.forEach { element ->
+        val canJoin = previous?.let { prior -> numberElementsCanJoin(prior, element) } == true
+        if (!canJoin) flush()
+        currentText += element.text.filterNot(Char::isWhitespace)
+        currentBounds = currentBounds?.union(element.bounds) ?: element.bounds
+        previous = element
+    }
+    flush()
+    return tokens
+}
+
+private fun numericFragments(text: String): List<String> =
+    Regex("[-+]?\\d+(?:[.,]\\d*)?|[.,]\\d+|[.,]")
+        .findAll(text.filterNot(Char::isWhitespace))
+        .map { it.value }
+        .toList()
+
+private fun numberElementsCanJoin(first: NumberTextElement, second: NumberTextElement): Boolean {
+    val firstHeight = first.bounds.bottom - first.bounds.top
+    val secondHeight = second.bounds.bottom - second.bounds.top
+    val minimumHeight = minOf(firstHeight, secondHeight)
+    val maximumHeight = maxOf(firstHeight, secondHeight)
+    if (minimumHeight <= 0f || maximumHeight / minimumHeight > 1.8f) return false
+    val baselineDelta = abs(first.bounds.bottom - second.bounds.bottom)
+    if (baselineDelta > maxOf(2f, minimumHeight * 0.5f)) return false
+    val horizontalGap = second.bounds.left - first.bounds.right
+    return horizontalGap >= -minimumHeight * 0.5f &&
+        horizontalGap <= maxOf(4f, maximumHeight * 1.5f)
+}
+
+private fun ClickBounds.union(other: ClickBounds): ClickBounds = ClickBounds(
+    left = minOf(left, other.left),
+    top = minOf(top, other.top),
+    right = maxOf(right, other.right),
+    bottom = maxOf(bottom, other.bottom),
 )
 
 internal fun selectNumberMonitorValues(candidates: List<NumberTextCandidate>): List<Double> =
     candidates.mapNotNull { candidate ->
-        extractDecimalNumbers(candidate.text).firstOrNull()?.let { value -> candidate to value }
+        extractDecimalNumbers(candidate.text).firstOrNull()
+            ?.takeIf(Double::isFinite)
+            ?.let { value -> candidate to value }
     }
         .minWithOrNull(compareBy<Pair<NumberTextCandidate, Double>> { it.first.centerDistanceSquared }
             .thenBy { it.first.area })

@@ -34,7 +34,9 @@ class MediaProjectionCaptureService : Service() {
     private var virtualDisplay: VirtualDisplay? = null
     private var imageReader: ImageReader? = null
     private val callbackLock = Any()
-    private var pendingFrameCallback: ((Bitmap?) -> Unit)? = null
+    private var nextRequestId = 0L
+    private var projectionGeneration = 0L
+    private var pendingFrameRequest: PendingFrameRequest? = null
 
     override fun onCreate() {
         super.onCreate()
@@ -65,10 +67,7 @@ class MediaProjectionCaptureService : Service() {
     override fun onBind(intent: Intent?): IBinder? = null
 
     override fun onDestroy() {
-        synchronized(callbackLock) {
-            pendingFrameCallback?.invoke(null)
-            pendingFrameCallback = null
-        }
+        takePendingFrameRequest()?.callback?.invoke(null)
         imageReader?.setOnImageAvailableListener(null, null)
         virtualDisplay?.release()
         imageReader?.close()
@@ -83,6 +82,9 @@ class MediaProjectionCaptureService : Service() {
     }
 
     private fun startProjection(resultCode: Int, resultData: Intent) {
+        takePendingFrameRequest()?.callback?.invoke(null)
+        projectionGeneration++
+        publishProjectionGeneration(projectionGeneration)
         virtualDisplay?.release()
         imageReader?.close()
         projection?.stop()
@@ -130,16 +132,20 @@ class MediaProjectionCaptureService : Service() {
 
     private fun onImageAvailable(reader: ImageReader) {
         val image = reader.acquireLatestImage() ?: return
-        val callback = synchronized(callbackLock) {
-            pendingFrameCallback.also { pendingFrameCallback = null }
+        // A queued callback from a released reader belongs to the previous projection and must
+        // never complete a request owned by the new projection generation.
+        if (reader !== imageReader) {
+            image.close()
+            return
         }
-        if (callback == null) {
+        val request = takePendingFrameRequest()
+        if (request == null) {
             image.close()
             return
         }
         val bitmap = runCatching { imageToBitmap(image) }.getOrNull()
         image.close()
-        callback(bitmap)
+        request.callback(bitmap)
     }
 
     private fun imageToBitmap(image: Image): Bitmap {
@@ -191,13 +197,49 @@ class MediaProjectionCaptureService : Service() {
     }
 
     private fun requestFrameInternal(callback: (Bitmap?) -> Unit) {
+        var busy = false
         synchronized(callbackLock) {
-            if (pendingFrameCallback != null) {
-                callback(null)
+            if (pendingFrameRequest != null) {
+                busy = true
             } else {
-                pendingFrameCallback = callback
+                val request = PendingFrameRequest(
+                    requestId = ++nextRequestId,
+                    projectionGeneration = projectionGeneration,
+                    callback = callback,
+                )
+                pendingFrameRequest = request
+                frameHandler.postDelayed(
+                    { timeoutPendingFrameRequest(request.requestId, request.projectionGeneration) },
+                    CAPTURE_TIMEOUT_MS,
+                )
             }
         }
+        // Never invoke caller code while callbackLock is held. A second request is explicitly
+        // rejected, while a missing ImageReader frame is completed by the watchdog.
+        if (busy) callback(null)
+    }
+
+    private fun takePendingFrameRequest(): PendingFrameRequest? = synchronized(callbackLock) {
+        pendingFrameRequest?.also { pendingFrameRequest = null }
+    }
+
+    private fun timeoutPendingFrameRequest(requestId: Long, requestGeneration: Long) {
+        val request = synchronized(callbackLock) {
+            pendingFrameRequest?.takeIf {
+                it.requestId == requestId && it.projectionGeneration == requestGeneration
+            }?.also { pendingFrameRequest = null }
+        }
+        request?.callback?.invoke(null)
+    }
+
+    private data class PendingFrameRequest(
+        val requestId: Long,
+        val projectionGeneration: Long,
+        val callback: (Bitmap?) -> Unit,
+    )
+
+    private fun publishProjectionGeneration(value: Long) {
+        projectionGenerationValue = value
     }
 
     companion object {
@@ -207,6 +249,7 @@ class MediaProjectionCaptureService : Service() {
         private const val ACTION_STOP = "com.example.csc.capture.STOP"
         private const val EXTRA_RESULT_CODE = "result_code"
         private const val EXTRA_RESULT_DATA = "result_data"
+        private const val CAPTURE_TIMEOUT_MS = 1_500L
 
         @Volatile
         private var instance: MediaProjectionCaptureService? = null
@@ -214,6 +257,12 @@ class MediaProjectionCaptureService : Service() {
         @Volatile
         var running: Boolean = false
             private set
+
+        @Volatile
+        private var projectionGenerationValue: Long = 0L
+
+        val projectionGeneration: Long
+            get() = projectionGenerationValue
 
         fun startIntent(context: Context, resultCode: Int, resultData: Intent): Intent =
             Intent(context, MediaProjectionCaptureService::class.java)

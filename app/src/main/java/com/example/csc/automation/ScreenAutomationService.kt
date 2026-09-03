@@ -64,8 +64,9 @@ class ScreenAutomationService : AccessibilityService() {
     private val prioritySwipePending = AtomicBoolean(false)
     private val destroyed = AtomicBoolean(false)
     private val actionState = ActionStateMachine()
+    private val sessionGate = AutomationSessionGate()
     private val adaptiveScan = AdaptiveScanController()
-    private val numberSwipeConfirmation = NumberSwipeConfirmation()
+    private val numberMonitorTracker = NumberMonitorTracker()
     private val circleXCalibrator = CircleXAutoCalibrator()
     private val latinRecognizer: TextRecognizer by lazy {
         TextRecognition.getClient(TextRecognizerOptions.DEFAULT_OPTIONS)
@@ -110,6 +111,7 @@ class ScreenAutomationService : AccessibilityService() {
     }
     private var monitoredPackage: String? = null
     private var detectedNumberOverlayText = "尚未開始"
+    private var confirmedNumberDisplay = "尚未開始"
     private var circleXHoldingNumberCountdown = false
     private var textTargetHoldingNumberCountdown = false
     private var imageTargetHoldingNumberCountdown = false
@@ -117,9 +119,14 @@ class ScreenAutomationService : AccessibilityService() {
     private var prioritySwipeSourceZoneId: String? = null
     private var prioritySwipeSourceName: String? = null
     private var prioritySwipeObservedPackage: String? = null
+    private var prioritySwipeSession: AutomationSession? = null
     private var prioritySwipeBlockedByRecognition = false
     private var lastVisualSafetyScanAt = Long.MIN_VALUE
     private var numberPriorityPassPending = false
+    private var numberTrackerGeneration = 0L
+    private var numberTrackerKey: NumberTrackerKey? = null
+    private var pendingGestureToken: ActionToken? = null
+    private var gestureWatchdog: Runnable? = null
 
     private val scanRunnable = object : Runnable {
         override fun run() = scanOnce()
@@ -139,6 +146,7 @@ class ScreenAutomationService : AccessibilityService() {
             ?: return
         if (activePackage == foregroundPackage) return
         foregroundPackage = activePackage
+        sessionGate.invalidate()
         // A scan may have intentionally stopped while automation was disabled. Wake it whenever
         // the foreground app changes so enabling and immediately switching apps cannot miss the
         // one-shot refresh that creates the recognition-region overlay.
@@ -152,6 +160,10 @@ class ScreenAutomationService : AccessibilityService() {
 
     override fun onDestroy() {
         destroyed.set(true)
+        sessionGate.invalidate()
+        gestureWatchdog?.let(mainHandler::removeCallbacks)
+        gestureWatchdog = null
+        pendingGestureToken = null
         connected = false
         instance = null
         mainHandler.removeCallbacksAndMessages(null)
@@ -161,7 +173,7 @@ class ScreenAutomationService : AccessibilityService() {
         prioritySwipePending.set(false)
         actionState.cancel()
         adaptiveScan.reset()
-        numberSwipeConfirmation.reset()
+        numberMonitorTracker.reset()
         circleXCalibrator.reset()
         circleXHoldingNumberCountdown = false
         textTargetHoldingNumberCountdown = false
@@ -187,6 +199,7 @@ class ScreenAutomationService : AccessibilityService() {
     private fun scanOnce() {
         rootInActiveWindow?.packageName?.toString()?.let { foregroundPackage = it }
         val settings = AutomationConfig.read(this)
+        currentSession(settings)
         if (foregroundPackage != monitoredPackage) {
             monitoredPackage = foregroundPackage
             circleXHoldingNumberCountdown = false
@@ -195,12 +208,17 @@ class ScreenAutomationService : AccessibilityService() {
             recognizedZoneIds.clear()
             if (prioritySwipePending.get()) cancelPrioritySwipe("前景頁面已變更，取消優先上滑")
             resetNumberAbsenceTracking()
+            numberMonitorTracker.reset()
+            numberTrackerKey = null
+            confirmedNumberDisplay = "尚未開始"
             resetImageEvidence()
-            numberSwipeConfirmation.reset()
         }
         if (!settings.numberMonitorEnabled) {
             resetNumberAbsenceTracking()
-            numberSwipeConfirmation.reset()
+            numberMonitorTracker.reset()
+            numberTrackerKey = null
+        } else {
+            syncNumberTrackerGeneration(settings, foregroundPackage)
         }
         val targetForeground = isTargetForeground(settings)
         syncRecognitionRegionOverlay(
@@ -275,7 +293,7 @@ class ScreenAutomationService : AccessibilityService() {
             processing.set(false)
             return
         }
-        val frameProfile = FrameProfile()
+        val frameProfile = FrameProfile().also { it.session = currentSession(settings) }
         val capturePackage = foregroundPackage
         if (Build.VERSION.SDK_INT < 30) {
             MediaProjectionCaptureService.requestFrame { bitmap ->
@@ -285,6 +303,11 @@ class ScreenAutomationService : AccessibilityService() {
                     frameProfile.captureCallbackWaitMs = frameProfile.elapsedSincePostMs()
                     if (destroyed.get()) {
                         bitmap?.recycle()
+                        return@post
+                    }
+                    if (!isSessionCurrent(frameProfile.session)) {
+                        bitmap?.recycle()
+                        finishProcessing(frameProfile)
                         return@post
                     }
                     if (bitmap == null) {
@@ -331,6 +354,11 @@ class ScreenAutomationService : AccessibilityService() {
                         bitmap.recycle()
                         return
                     }
+                    if (!isSessionCurrent(frameProfile.session)) {
+                        bitmap.recycle()
+                        finishProcessing(frameProfile)
+                        return
+                    }
 
                     recognizeBitmap(bitmap, settings, capturePackage, clicksAllowed, frameProfile)
                 }
@@ -353,6 +381,11 @@ class ScreenAutomationService : AccessibilityService() {
         clicksAllowed: Boolean,
         frameProfile: FrameProfile,
     ) {
+        if (!isSessionCurrent(frameProfile.session)) {
+            bitmap.recycle()
+            finishProcessing(frameProfile)
+            return
+        }
         val fingerprintStartedAt = SystemClock.elapsedRealtime()
         val frameChanged = adaptiveScan.observeFrame(bitmapFingerprint(bitmap))
         frameProfile.fingerprintMs = SystemClock.elapsedRealtime() - fingerprintStartedAt
@@ -435,7 +468,7 @@ class ScreenAutomationService : AccessibilityService() {
                     finishProcessing(frameProfile)
                     return@addOnSuccessListener
                 }
-                if (!resultIsStillRelevant(settings, capturePackage)) {
+                if (!resultIsStillRelevant(settings, capturePackage, frameProfile.session)) {
                     releaseOcrBitmap()
                     bitmap.recycle()
                     finishProcessing(frameProfile)
@@ -462,6 +495,7 @@ class ScreenAutomationService : AccessibilityService() {
                     bitmap,
                     preparedOcr.offsetX,
                     preparedOcr.offsetY,
+                    frameProfile.session,
                 )
                 if (swipePending.get()) {
                     releaseOcrBitmap()
@@ -483,6 +517,7 @@ class ScreenAutomationService : AccessibilityService() {
                         "${hit.zone.name} · OCR「${hit.target.value}」",
                         bitmap.width,
                         bitmap.height,
+                        actionSession = frameProfile.session,
                     )
                     releaseOcrBitmap()
                     bitmap.recycle()
@@ -506,7 +541,8 @@ class ScreenAutomationService : AccessibilityService() {
                     return@addOnFailureListener
                 }
                 textTargetHoldingNumberCountdown = false
-                lastResult = "文字辨識失敗：${error.localizedMessage ?: "未知錯誤"}"
+                observeInvalidNumber(settings, capturePackage, bitmap, "辨識失敗", frameProfile.session)
+                if (!settings.numberMonitorEnabled) lastResult = "文字辨識失敗"
                 releaseOcrBitmap()
                 if (skipVisualSafetyScan) {
                     bitmap.recycle()
@@ -581,7 +617,7 @@ class ScreenAutomationService : AccessibilityService() {
                     finishProcessing(frameProfile)
                     return@post
                 }
-                if (!resultIsStillRelevant(settings, capturePackage)) {
+                    if (!resultIsStillRelevant(settings, capturePackage, frameProfile.session)) {
                     bitmap.recycle()
                     finishProcessing(frameProfile)
                     return@post
@@ -628,6 +664,7 @@ class ScreenAutomationService : AccessibilityService() {
                             currentCalibration.minDiameterRatio,
                             currentCalibration.maxDiameterRatio,
                         ),
+                        actionSession = frameProfile.session,
                     )
                     bitmap.recycle()
                     finishProcessing(frameProfile)
@@ -795,7 +832,7 @@ class ScreenAutomationService : AccessibilityService() {
                     frameProfile.mainCallbackWaitMs += frameProfile.elapsedSincePostMs()
                     if (destroyed.get()) return@post
                     val completedHits = hits
-                    val relevant = resultIsStillRelevant(settings, capturePackage)
+                    val relevant = resultIsStillRelevant(settings, capturePackage, frameProfile.session)
                     if (relevant) {
                         zoneSimilarities.keys.retainAll(imageZones.map { it.id }.toSet())
                         zoneSimilarities.putAll(currentSimilarities)
@@ -874,6 +911,7 @@ class ScreenAutomationService : AccessibilityService() {
                                 minDiameterRatio = calibration?.minDiameterRatio ?: 0.16f,
                                 maxDiameterRatio = calibration?.maxDiameterRatio ?: 0.72f,
                             ),
+                            actionSession = frameProfile.session,
                         )
                     } else if (completedHits.isNotEmpty() && relevant && !settings.numberMonitorEnabled) {
                         val bestPending = completedHits.maxByOrNull { it.match.score }!!
@@ -990,10 +1028,12 @@ class ScreenAutomationService : AccessibilityService() {
     private fun resultIsStillRelevant(
         capturedSettings: AutomationSettings,
         capturePackage: String?,
+        capturedSession: AutomationSession? = null,
     ): Boolean {
         val current = AutomationConfig.read(this)
         if (!current.enabled) return false
         if (foregroundPackage != capturePackage || !isTargetForeground(current)) return false
+        if (capturedSession != null && !isSessionCurrent(capturedSession)) return false
         return current.zones == capturedSettings.zones &&
             current.targetPackage == capturedSettings.targetPackage &&
             current.matchThreshold == capturedSettings.matchThreshold &&
@@ -1008,6 +1048,53 @@ class ScreenAutomationService : AccessibilityService() {
             current.numberAbsenceTimeoutMs == capturedSettings.numberAbsenceTimeoutMs &&
             current.numberTriggerZoneId == capturedSettings.numberTriggerZoneId &&
             current.numberTriggerDelayMs == capturedSettings.numberTriggerDelayMs
+    }
+
+    private fun currentSession(settings: AutomationSettings): AutomationSession = sessionGate.update(
+        targetPackage = settings.targetPackage,
+        foregroundPackage = foregroundPackage,
+        configSignature = settings.sessionSignature(),
+        projectionGeneration = if (Build.VERSION.SDK_INT < 30) {
+            MediaProjectionCaptureService.projectionGeneration
+        } else {
+            0L
+        },
+    )
+
+    private fun isSessionCurrent(session: AutomationSession?): Boolean {
+        if (session == null || destroyed.get()) return false
+        val settings = AutomationConfig.read(this)
+        return sessionGate.isCurrent(currentSession(settings)) && sessionGate.isCurrent(session) &&
+            isTargetForeground(settings)
+    }
+
+    private fun isActionCurrent(token: ActionToken): Boolean = isSessionCurrent(token.session) &&
+        sessionGate.isCurrent(token)
+
+    private fun syncNumberTrackerGeneration(
+        settings: AutomationSettings,
+        observedPackage: String?,
+    ) {
+        val key = NumberTrackerKey(
+            foregroundPackage = observedPackage,
+            targetPackage = settings.targetPackage,
+            enabled = settings.enabled,
+            monitorEnabled = settings.numberMonitorEnabled,
+            region = settings.numberMonitorRegion.normalized(),
+            threshold = settings.numberMonitorThreshold,
+            upperLimit = settings.numberMonitorUpperLimit,
+            colorFilterEnabled = settings.numberColorFilterEnabled,
+            colorHex = settings.numberColorHex,
+            colorTolerance = settings.numberColorTolerance,
+            absenceTimeoutMs = settings.numberAbsenceTimeoutMs,
+            triggerZoneId = settings.numberTriggerZoneId,
+            triggerDelayMs = settings.numberTriggerDelayMs,
+        )
+        if (key == numberTrackerKey) return
+        numberTrackerKey = key
+        numberTrackerGeneration++
+        numberMonitorTracker.reset()
+        resetNumberAbsenceTracking()
     }
 
     private fun resetImageEvidence() {
@@ -1122,65 +1209,139 @@ class ScreenAutomationService : AccessibilityService() {
         bitmap: Bitmap,
         offsetX: Int,
         offsetY: Int,
+        capturedSession: AutomationSession?,
     ) {
-        if (!settings.numberMonitorEnabled || foregroundPackage != capturePackage) return
+        if (!settings.numberMonitorEnabled || foregroundPackage != capturePackage ||
+            !isSessionCurrent(capturedSession)
+        ) return
+        syncNumberTrackerGeneration(settings, capturePackage)
+        val roiSignature = numberMonitorSignature(bitmap, settings.numberMonitorRegion)
         val filterColor = if (settings.numberColorFilterEnabled) {
             runCatching { Color.parseColor(settings.numberColorHex.trim()) }.getOrNull()
         } else {
             null
         }
         if (settings.numberColorFilterEnabled && filterColor == null) {
-            numberSwipeConfirmation.reset()
+            numberMonitorTracker.reset()
+            resetNumberAbsenceTracking()
             updateDetectedNumberDisplay("色碼格式錯誤")
-            lastResult = "數字色碼格式錯誤，請使用 #RRGGBB"
+            lastResult = "數字色碼錯誤，請用 #RRGGBB。"
             return
         }
-        val candidates = buildList<Pair<String, Rect>> {
+        val candidates = buildList {
             result.textBlocks.flatMap { it.lines }.forEach { line ->
-                // A decimal can be split into separate OCR elements ("0", ".", "2").
-                // Parsing those independently invents a standalone "2" from "0.2",
-                // which can incorrectly keep the page in place.  Use the complete line
-                // for number monitoring so the decimal context remains intact.
-                line.boundingBox?.offsetCopy(offsetX, offsetY)?.let { bounds -> add(line.text to bounds) }
+                val elements = line.elements.mapNotNull { element ->
+                    element.boundingBox?.offsetCopy(offsetX, offsetY)?.let { bounds ->
+                        NumberTextElement(
+                            text = element.text,
+                            bounds = ClickBounds(
+                                bounds.left.toFloat(),
+                                bounds.top.toFloat(),
+                                bounds.right.toFloat(),
+                                bounds.bottom.toFloat(),
+                            ),
+                        )
+                    }
+                }
+                val tokens = rebuildNumberTokens(elements)
+                if (tokens.isNotEmpty()) {
+                    tokens.forEach { token ->
+                        add(
+                            NumberTextCandidate(
+                                text = token.text,
+                                centerDistanceSquared = 0.0,
+                                area = ((token.bounds.right - token.bounds.left) *
+                                    (token.bounds.bottom - token.bounds.top)).toLong().coerceAtLeast(1L),
+                                bounds = token.bounds,
+                            ),
+                        )
+                    }
+                } else if (elements.isEmpty()) {
+                    // Keep a conservative fallback for recognizers that return line text without
+                    // element boxes. Once element boxes exist, an unrecognised line is treated as
+                    // missing instead of using a loose line-sized color/position candidate.
+                    line.boundingBox?.offsetCopy(offsetX, offsetY)?.let { bounds ->
+                        add(
+                            NumberTextCandidate(
+                                text = line.text,
+                                centerDistanceSquared = 0.0,
+                                area = bounds.width().toLong() * bounds.height().toLong(),
+                                bounds = ClickBounds(
+                                    bounds.left.toFloat(),
+                                    bounds.top.toFloat(),
+                                    bounds.right.toFloat(),
+                                    bounds.bottom.toFloat(),
+                                ),
+                            ),
+                        )
+                    }
+                }
             }
         }
         val normalizedMonitorRegion = settings.numberMonitorRegion.normalized()
         val monitorCenterX = (normalizedMonitorRegion.left + normalizedMonitorRegion.right) / 2f
         val monitorCenterY = (normalizedMonitorRegion.top + normalizedMonitorRegion.bottom) / 2f
         val values = candidates
-            .filter { (_, bounds) ->
+            .filter { candidate ->
+                val bounds = candidate.bounds ?: return@filter false
                 settings.numberMonitorRegion.containsBounds(
-                    bounds.left.toFloat(),
-                    bounds.top.toFloat(),
-                    bounds.right.toFloat(),
-                    bounds.bottom.toFloat(),
+                    bounds.left,
+                    bounds.top,
+                    bounds.right,
+                    bounds.bottom,
                     bitmap.width,
                     bitmap.height,
                 ) && (filterColor == null || numberBoundsContainColor(
                     bitmap,
-                    bounds,
+                    Rect(
+                        bounds.left.toInt(),
+                        bounds.top.toInt(),
+                        bounds.right.toInt(),
+                        bounds.bottom.toInt(),
+                    ),
                     filterColor,
                     settings.numberColorTolerance,
                 ))
             }
-            .map { (value, bounds) ->
+            .map { candidate ->
+                val bounds = candidate.bounds!!
                 val centerX = (bounds.left + bounds.right) / 2f / bitmap.width
                 val centerY = (bounds.top + bounds.bottom) / 2f / bitmap.height
                 val deltaX = (centerX - monitorCenterX).toDouble()
                 val deltaY = (centerY - monitorCenterY).toDouble()
-                NumberTextCandidate(
-                    text = value,
-                    centerDistanceSquared = deltaX * deltaX + deltaY * deltaY,
-                    area = bounds.width().toLong() * bounds.height().toLong(),
-                )
+                candidate.copy(centerDistanceSquared = deltaX * deltaX + deltaY * deltaY)
             }
             .let(::selectNumberMonitorValues)
 
-        if (isAnyRecognitionHoldingNumberCountdown(settings) && !prioritySwipePending.get()) {
-            numberSwipeConfirmation.reset()
+        val displayText = if (values.isEmpty()) {
+            if (filterColor == null) "無數字" else "無符合顏色數字"
+        } else {
+            formatRecognizedNumbers(values)
+        }
+        val priorityPending = prioritySwipePending.get()
+        val observedNumber = values.maxOrNull()?.let { value -> NumberMonitorTracker.Observation.Value(value) }
+            ?: NumberMonitorTracker.Observation.Missing
+        val trackerAction = numberMonitorTracker.observe(
+            nowMs = SystemClock.elapsedRealtime(),
+            observation = observedNumber,
+            roiSignature = roiSignature,
+            threshold = settings.numberMonitorThreshold,
+            upperLimit = settings.numberMonitorUpperLimit,
+            absenceTimeoutMs = settings.numberAbsenceTimeoutMs,
+            prioritySwipePending = priorityPending,
+            generation = numberTrackerGeneration,
+        )
+
+        if (priorityPending) {
+            updateDetectedNumberDisplay(displayText)
+            return
+        }
+
+        if (isAnyRecognitionHoldingNumberCountdown(settings)) {
+            numberMonitorTracker.reset()
             resetNumberAbsenceTracking()
             updateDetectedNumberDisplay(
-                if (values.isEmpty()) "目標命中" else formatRecognizedNumbers(values),
+                if (values.isEmpty()) "目標命中" else displayText,
             )
             lastResult = "辨識區域命中目標，上滑倒數已重設"
             return
@@ -1188,46 +1349,145 @@ class ScreenAutomationService : AccessibilityService() {
 
         if (values.isNotEmpty()) {
             resetNumberAbsenceTracking()
-            updateDetectedNumberDisplay(formatRecognizedNumbers(values))
             val maximum = values.maxOrNull() ?: return
-            when (decideNumberMonitorAction(values, settings.numberMonitorThreshold, settings.numberMonitorUpperLimit)) {
-                NumberMonitorDecision.STAY -> {
-                    numberSwipeConfirmation.reset()
-                    lastResult = "數字 $maximum ≥ ${settings.numberMonitorThreshold}，停留目前頁面"
+            val decision = decideNumberMonitorAction(
+                values,
+                settings.numberMonitorThreshold,
+                settings.numberMonitorUpperLimit,
+            )
+            val riskReason = if (decision == NumberMonitorDecision.SWIPE_UP) {
+                if (maximum > settings.numberMonitorUpperLimit) {
+                    "數字 $maximum 超過上限 ${settings.numberMonitorUpperLimit}"
+                } else {
+                    "數字 $maximum 小於門檻 ${settings.numberMonitorThreshold}"
                 }
-                NumberMonitorDecision.SWIPE_UP -> {
-                    val reason = if (maximum > settings.numberMonitorUpperLimit) {
-                        "數字 $maximum 超過上限 ${settings.numberMonitorUpperLimit}"
-                    } else {
-                        "數字 $maximum 小於門檻 ${settings.numberMonitorThreshold}"
-                    }
-                    if (!numberSwipeConfirmation.observe(
-                            maximum,
-                            settings.numberMonitorThreshold,
-                            settings.numberMonitorUpperLimit,
-                        )
-                    ) {
-                        updateDetectedNumberDisplay("${formatRecognizedNumbers(values)}\n確認 1/2")
-                        adaptiveScan.requestConfirmation(SystemClock.elapsedRealtime())
-                        mainHandler.removeCallbacks(scanRunnable)
-                        mainHandler.postDelayed(scanRunnable, 250L)
-                        lastResult = "$reason，等待第二幀確認"
-                    } else {
-                        scheduleSwipeUp("$reason；已連續確認 2 幀")
-                    }
-                }
-                NumberMonitorDecision.NO_NUMBERS -> Unit
-            }
+            } else null
+            applyNumberMonitorAction(
+                action = trackerAction,
+                nowMs = SystemClock.elapsedRealtime(),
+                settings = settings,
+                capturePackage = capturePackage,
+                displayText = displayText,
+                absenceReason = "連續沒有偵測到數字",
+                riskReason = riskReason,
+                stayMessage = "數字 $maximum，停留目前頁面",
+                actionSession = capturedSession,
+            )
             return
         }
 
-        numberSwipeConfirmation.reset()
-        updateDetectedNumberDisplay(if (filterColor == null) "無數字" else "無符合顏色數字")
-        scheduleNumberWaitSwipe(
-            if (filterColor == null) "連續沒有偵測到數字" else "連續沒有偵測到符合顏色的數字",
-            settings.numberAbsenceTimeoutMs,
-            capturePackage,
+        applyNumberMonitorAction(
+            action = trackerAction,
+            nowMs = SystemClock.elapsedRealtime(),
+            settings = settings,
+            capturePackage = capturePackage,
+            displayText = displayText,
+            absenceReason = if (filterColor == null) {
+                "連續沒有偵測到數字"
+            } else {
+                "連續沒有偵測到符合顏色的數字"
+            },
+            riskReason = null,
+            stayMessage = null,
+            actionSession = capturedSession,
         )
+    }
+
+    private fun observeInvalidNumber(
+        settings: AutomationSettings,
+        capturePackage: String?,
+        bitmap: Bitmap,
+        displayText: String,
+        capturedSession: AutomationSession?,
+    ) {
+        if (!settings.numberMonitorEnabled || foregroundPackage != capturePackage ||
+            !isSessionCurrent(capturedSession)
+        ) return
+        syncNumberTrackerGeneration(settings, capturePackage)
+        val action = numberMonitorTracker.observe(
+            nowMs = SystemClock.elapsedRealtime(),
+            observation = NumberMonitorTracker.Observation.Invalid,
+            roiSignature = numberMonitorSignature(bitmap, settings.numberMonitorRegion),
+            threshold = settings.numberMonitorThreshold,
+            upperLimit = settings.numberMonitorUpperLimit,
+            absenceTimeoutMs = settings.numberAbsenceTimeoutMs,
+            prioritySwipePending = prioritySwipePending.get(),
+            generation = numberTrackerGeneration,
+        )
+        if (prioritySwipePending.get()) {
+            updateDetectedNumberDisplay(displayText)
+            return
+        }
+        if (isAnyRecognitionHoldingNumberCountdown(settings)) {
+            numberMonitorTracker.reset()
+            resetNumberAbsenceTracking()
+            updateDetectedNumberDisplay("目標命中")
+            lastResult = "辨識區域命中目標，上滑倒數已重設"
+            return
+        }
+        applyNumberMonitorAction(
+            action = action,
+            nowMs = SystemClock.elapsedRealtime(),
+            settings = settings,
+            capturePackage = capturePackage,
+            displayText = displayText,
+            absenceReason = "連續無法辨識數字",
+            riskReason = null,
+            stayMessage = null,
+            actionSession = capturedSession,
+        )
+    }
+
+    private fun applyNumberMonitorAction(
+        action: NumberMonitorAction,
+        nowMs: Long,
+        settings: AutomationSettings,
+        capturePackage: String?,
+        displayText: String,
+        absenceReason: String,
+        riskReason: String?,
+        stayMessage: String?,
+        actionSession: AutomationSession?,
+    ) {
+        when (action) {
+            NumberMonitorAction.STAY -> {
+                resetNumberAbsenceTracking()
+                if (displayText.isNotBlank() && !displayText.contains("無") && !displayText.contains("失敗")) {
+                    confirmedNumberDisplay = displayText
+                }
+                updateDetectedNumberDisplay(displayText)
+                stayMessage?.let { lastResult = it }
+            }
+            NumberMonitorAction.WAIT_FOR_CONFIRMATION -> {
+                updateDetectedNumberDisplay("${confirmedNumberDisplay.takeIf { it != "尚未開始" } ?: displayText}\n確認中")
+                adaptiveScan.requestConfirmation(nowMs)
+                mainHandler.removeCallbacks(scanRunnable)
+                mainHandler.postDelayed(scanRunnable, NUMBER_CONFIRMATION_SCAN_DELAY_MS)
+                lastResult = "${riskReason ?: "數字需確認"}，等待確認"
+            }
+            NumberMonitorAction.START_OR_KEEP_ABSENCE -> {
+                updateDetectedNumberDisplay("${confirmedNumberDisplay.takeIf { it != "尚未開始" } ?: "無數字"}\n重新確認")
+                scheduleNumberWaitSwipe(absenceReason, settings.numberAbsenceTimeoutMs, capturePackage)
+            }
+            NumberMonitorAction.REQUEST_FRESH_OBSERVATION -> {
+                resetNumberAbsenceTracking()
+                val status = if (displayText.contains("失敗")) "辨識失敗" else {
+                    confirmedNumberDisplay.takeIf { it != "尚未開始" } ?: "無數字"
+                }
+                updateDetectedNumberDisplay("$status\n重新確認")
+                requestFreshNumberObservation(nowMs)
+            }
+            NumberMonitorAction.SWIPE_LOW,
+            NumberMonitorAction.SWIPE_HIGH,
+            -> {
+                numberMonitorTracker.markActionConsumed()
+                scheduleSwipeUp(riskReason ?: "數字條件觸發上滑", actionSession = actionSession)
+            }
+            NumberMonitorAction.SWIPE_ABSENT -> {
+                numberMonitorTracker.markActionConsumed()
+                scheduleSwipeUp("$absenceReason；期限點仍無數字", actionSession = actionSession)
+            }
+        }
     }
 
     private fun ocrRegion(
@@ -1336,13 +1596,25 @@ class ScreenAutomationService : AccessibilityService() {
         renderNumberOverlay()
     }
 
+    private fun requestFreshNumberObservation(nowMs: Long) {
+        adaptiveScan.requestConfirmation(nowMs)
+        mainHandler.removeCallbacks(scanRunnable)
+        mainHandler.postDelayed(scanRunnable, NUMBER_CONFIRMATION_SCAN_DELAY_MS)
+        lastResult = "等待期限點重新辨識"
+    }
+
     private fun scheduleNumberWaitSwipe(reason: String, waitMs: Long, observedPackage: String?) {
-        if (numberAbsenceRunnable != null) return
+        if (prioritySwipePending.get() || numberAbsenceRunnable != null) return
         val waitSeconds = formatSeconds(waitMs)
+        val scheduledGeneration = numberTrackerGeneration
         val runnable = Runnable {
             numberAbsenceRunnable = null
             val current = AutomationConfig.read(this)
-            if (isAnyRecognitionHoldingNumberCountdown(current) && !prioritySwipePending.get()) {
+            if (prioritySwipePending.get()) {
+                resetNumberAbsenceTracking()
+                return@Runnable
+            }
+            if (isAnyRecognitionHoldingNumberCountdown(current)) {
                 resetNumberAbsenceTracking()
                 lastResult = "辨識區域仍有目標，上滑倒數維持重設"
                 return@Runnable
@@ -1351,23 +1623,52 @@ class ScreenAutomationService : AccessibilityService() {
                 current.enabled && current.numberMonitorEnabled &&
                 foregroundPackage == observedPackage && isTargetForeground(current)
             ) {
-                scheduleSwipeUp("$reason；等待 $waitSeconds 秒後上滑")
+                syncNumberTrackerGeneration(current, observedPackage)
+                if (scheduledGeneration != numberTrackerGeneration) {
+                    resetNumberAbsenceTracking()
+                    return@Runnable
+                }
+                when (numberMonitorTracker.onAbsenceDeadline(
+                    SystemClock.elapsedRealtime(),
+                    scheduledGeneration,
+                )) {
+                    NumberMonitorAction.REQUEST_FRESH_OBSERVATION -> {
+                        resetNumberAbsenceTracking()
+                        updateDetectedNumberDisplay("無數字\n重新確認")
+                        requestFreshNumberObservation(SystemClock.elapsedRealtime())
+                    }
+                    NumberMonitorAction.START_OR_KEEP_ABSENCE -> {
+                        // A handler can run a little early. Keep the deadline safe by leaving the
+                        // tracker in absence state and asking for a fresh observation instead of
+                        // ever converting the timer directly into a swipe.
+                        updateDetectedNumberDisplay("無數字\n重新確認")
+                        requestFreshNumberObservation(SystemClock.elapsedRealtime())
+                    }
+                    else -> resetNumberAbsenceTracking()
+                }
             }
         }
         numberAbsenceRunnable = runnable
         mainHandler.postDelayed(runnable, waitMs)
-        lastResult = "$reason，開始等待 $waitSeconds 秒"
+        lastResult = "$reason，等待 $waitSeconds 秒"
         startNumberCountdown("$reason，等待上滑", waitMs)
     }
 
-    private fun scheduleConfiguredTriggerSwipe(zoneId: String, zoneName: String, settings: AutomationSettings) {
+    private fun scheduleConfiguredTriggerSwipe(
+        zoneId: String,
+        zoneName: String,
+        settings: AutomationSettings,
+        session: AutomationSession,
+    ) {
         triggerSwipeRunnable?.let(mainHandler::removeCallbacks)
         resetNumberAbsenceTracking()
+        numberMonitorTracker.markActionConsumed()
         prioritySwipePending.set(true)
         actionState.gestureFinished(cooldown = false)
         prioritySwipeSourceZoneId = zoneId
         prioritySwipeSourceName = zoneName
         prioritySwipeObservedPackage = foregroundPackage
+        prioritySwipeSession = session
         prioritySwipeBlockedByRecognition = false
         startPrioritySwipeCountdown(settings)
     }
@@ -1378,10 +1679,12 @@ class ScreenAutomationService : AccessibilityService() {
         val waitSeconds = formatSeconds(delayMs)
         val zoneName = prioritySwipeSourceName ?: return
         val detectedPackage = prioritySwipeObservedPackage
+        val detectedSession = prioritySwipeSession
         val runnable = Runnable {
             triggerSwipeRunnable = null
             val current = AutomationConfig.read(this)
             if (
+                !isSessionCurrent(detectedSession) ||
                 !current.enabled || !current.numberMonitorEnabled ||
                 current.numberTriggerZoneId != prioritySwipeSourceZoneId ||
                 foregroundPackage != detectedPackage || !isTargetForeground(current)
@@ -1395,7 +1698,11 @@ class ScreenAutomationService : AccessibilityService() {
                 lastResult = "其他辨識區域命中，等待降低後重新倒數"
                 return@Runnable
             }
-            scheduleSwipeUp("$zoneName 已觸發一次後等待 $waitSeconds 秒", priority = true)
+            scheduleSwipeUp(
+                "$zoneName 已觸發一次後等待 $waitSeconds 秒",
+                priority = true,
+                actionSession = detectedSession,
+            )
         }
         triggerSwipeRunnable = runnable
         mainHandler.postDelayed(runnable, delayMs)
@@ -1427,7 +1734,9 @@ class ScreenAutomationService : AccessibilityService() {
         prioritySwipeSourceZoneId = null
         prioritySwipeSourceName = null
         prioritySwipeObservedPackage = null
+        prioritySwipeSession = null
         prioritySwipeBlockedByRecognition = false
+        numberMonitorTracker.markActionConsumed()
     }
 
     private fun cancelPrioritySwipe(reason: String) {
@@ -1446,9 +1755,14 @@ class ScreenAutomationService : AccessibilityService() {
         if (display != null) display.getRealMetrics(metrics) else metrics.setTo(resources.displayMetrics)
     }
 
-    private fun scheduleSwipeUp(reason: String, priority: Boolean = false) {
+    private fun scheduleSwipeUp(
+        reason: String,
+        priority: Boolean = false,
+        actionSession: AutomationSession? = null,
+    ) {
+        if (!priority && prioritySwipePending.get()) return
         if (clickPending.get()) {
-            mainHandler.postDelayed({ scheduleSwipeUp(reason, priority) }, 100L)
+            mainHandler.postDelayed({ scheduleSwipeUp(reason, priority, actionSession) }, 100L)
             return
         }
         val settings = AutomationConfig.read(this)
@@ -1474,6 +1788,21 @@ class ScreenAutomationService : AccessibilityService() {
             }
             return
         }
+        val actionToken = if (actionSession != null) {
+            actionSession.takeIf(sessionGate::isCurrent)?.let { sessionGate.token(null, null) }
+        } else {
+            currentSession(settings)
+            sessionGate.token(null, null)
+        }
+        if (actionToken == null) {
+            swipePending.set(false)
+            if (priority) {
+                prioritySwipePending.set(false)
+                clearPrioritySwipeTracking()
+            }
+            actionState.cancelSwipe()
+            return
+        }
         resetNumberAbsenceTracking()
         val spec = randomSwipeSpec(settings.randomClickMaxMs)
         val detectedPackage = foregroundPackage
@@ -1481,6 +1810,7 @@ class ScreenAutomationService : AccessibilityService() {
         mainHandler.postDelayed({
             val current = AutomationConfig.read(this)
             if (
+                !isActionCurrent(actionToken) ||
                 !current.enabled || !current.numberMonitorEnabled ||
                 foregroundPackage != detectedPackage || !isTargetForeground(current)
             ) {
@@ -1513,6 +1843,7 @@ class ScreenAutomationService : AccessibilityService() {
                 gesture,
                 object : GestureResultCallback() {
                     override fun onCompleted(gestureDescription: GestureDescription?) {
+                        if (!finishGesture(actionToken)) return
                         if (priority) {
                             prioritySwipePending.set(false)
                             clearPrioritySwipeTracking()
@@ -1540,6 +1871,7 @@ class ScreenAutomationService : AccessibilityService() {
                     }
 
                     override fun onCancelled(gestureDescription: GestureDescription?) {
+                        if (!finishGesture(actionToken)) return
                         swipePending.set(false)
                         if (priority) {
                             prioritySwipePending.set(false)
@@ -1559,6 +1891,17 @@ class ScreenAutomationService : AccessibilityService() {
                 }
                 actionState.cancelSwipe()
                 lastResult = "系統拒絕滑動手勢"
+            } else {
+                armGestureWatchdog(actionToken) {
+                    if (actionState.cancelSwipe()) {
+                        swipePending.set(false)
+                        if (priority) {
+                            prioritySwipePending.set(false)
+                            clearPrioritySwipeTracking()
+                        }
+                        lastResult = "滑動回呼逾時，已解除等待"
+                    }
+                }
             }
         }, spec.delayMs)
     }
@@ -1572,6 +1915,7 @@ class ScreenAutomationService : AccessibilityService() {
         captureHeight: Int,
         imageTargetId: String? = null,
         imageVerification: ImageVerification? = null,
+        actionSession: AutomationSession? = null,
     ) {
         val settings = AutomationConfig.read(this)
         if (!settings.enabled || !isTargetForeground(settings)) return
@@ -1607,6 +1951,17 @@ class ScreenAutomationService : AccessibilityService() {
             clickPending.set(false)
             return
         }
+        val actionToken = if (actionSession != null) {
+            actionSession.takeIf(sessionGate::isCurrent)?.let { sessionGate.token(zoneId, imageTargetId) }
+        } else {
+            currentSession(settings)
+            sessionGate.token(zoneId, imageTargetId)
+        }
+        if (actionToken == null) {
+            clickPending.set(false)
+            actionState.cancelClick()
+            return
+        }
         pendingClickZoneId = zoneId
         zoneStatuses[zoneId] = "延遲"
         syncRecognitionRegionOverlay(
@@ -1615,10 +1970,11 @@ class ScreenAutomationService : AccessibilityService() {
         )
         val timing = randomGestureTiming(settings.randomClickMaxMs)
         val detectedPackage = foregroundPackage
-        lastResult = "等待隨機點擊：${timing.startDelayMs} 毫秒"
+        lastResult = "點擊中"
         mainHandler.postDelayed({
             val current = AutomationConfig.read(this)
             if (
+                !isActionCurrent(actionToken) ||
                 !current.enabled || foregroundPackage != detectedPackage ||
                 !isTargetForeground(current) ||
                 !current.canClick(safeX, safeY, metrics.widthPixels, metrics.heightPixels)
@@ -1635,7 +1991,7 @@ class ScreenAutomationService : AccessibilityService() {
                 return@postDelayed
             }
             if (imageVerification == null) {
-                dispatchTapGesture(point, current, zoneId, description, timing, imageTargetId)
+                dispatchTapGesture(point, current, zoneId, description, timing, imageTargetId, actionToken)
             } else {
                 zoneStatuses[zoneId] = "重驗"
                 syncRecognitionRegionOverlay(
@@ -1658,13 +2014,13 @@ class ScreenAutomationService : AccessibilityService() {
                         randomClickPoint(it, allowedRegion, latestMetrics.widthPixels, latestMetrics.heightPixels)
                     }
                     if (
-                        verifiedPoint == null || !latest.enabled || foregroundPackage != detectedPackage ||
+                        verifiedPoint == null || !isActionCurrent(actionToken) || !latest.enabled || foregroundPackage != detectedPackage ||
                         !isTargetForeground(latest) ||
                         !latest.canClick(verifiedPoint.x, verifiedPoint.y, latestMetrics.widthPixels, latestMetrics.heightPixels)
                     ) {
                         cancelPendingClick(zoneId, "重驗時目標已移動或消失")
                     } else {
-                        dispatchTapGesture(verifiedPoint, latest, zoneId, description, timing, imageTargetId)
+                        dispatchTapGesture(verifiedPoint, latest, zoneId, description, timing, imageTargetId, actionToken)
                     }
                 }
             }
@@ -1678,8 +2034,9 @@ class ScreenAutomationService : AccessibilityService() {
         description: String,
         timing: GestureTiming,
         imageTargetId: String?,
+        actionToken: ActionToken,
     ) {
-        if (!actionState.beginClicking()) {
+        if (!isActionCurrent(actionToken) || !actionState.beginClicking()) {
             cancelPendingClick(zoneId, "動作狀態已改變")
             return
         }
@@ -1691,6 +2048,7 @@ class ScreenAutomationService : AccessibilityService() {
             gesture,
             object : GestureResultCallback() {
                 override fun onCompleted(gestureDescription: GestureDescription?) {
+                    if (!finishGesture(actionToken)) return
                     clickPending.set(false)
                     pendingClickZoneId = null
                     zoneStatuses[zoneId] = "已點擊"
@@ -1699,11 +2057,16 @@ class ScreenAutomationService : AccessibilityService() {
                     }
                     lastClickAt = SystemClock.elapsedRealtime()
                     adaptiveScan.markGesture(lastClickAt)
-                    lastResult = "已點擊：$description（等待 ${timing.startDelayMs} ms，按住 ${timing.pressDurationMs} ms）"
+                    lastResult = "已點擊：$description"
                     if (settings.numberMonitorEnabled && settings.numberTriggerZoneId == zoneId) {
                         // This is the highest-priority follow-up. It is armed before
                         // overlays, markers or the next recognition scan can run.
-                        scheduleConfiguredTriggerSwipe(zoneId, description.substringBefore(" · "), settings)
+                        scheduleConfiguredTriggerSwipe(
+                            zoneId,
+                            description.substringBefore(" · "),
+                            settings,
+                            actionToken.session,
+                        )
                     } else {
                         actionState.gestureFinished()
                     }
@@ -1718,15 +2081,28 @@ class ScreenAutomationService : AccessibilityService() {
                 }
 
                 override fun onCancelled(gestureDescription: GestureDescription?) {
+                    if (!finishGesture(actionToken)) return
                     cancelPendingClick(zoneId, "點擊被系統取消")
                 }
             },
             mainHandler,
         )
-        if (!accepted) cancelPendingClick(zoneId, "系統拒絕點擊手勢", "被拒絕")
+        if (!accepted) {
+            cancelPendingClick(zoneId, "系統拒絕點擊手勢", "被拒絕")
+        } else {
+            armGestureWatchdog(actionToken) {
+                if (actionState.cancelClick()) {
+                    clickPending.set(false)
+                    pendingClickZoneId = null
+                    zoneStatuses[zoneId] = "逾時"
+                    lastResult = "點擊回呼逾時，已解除等待"
+                }
+            }
+        }
     }
 
     private fun cancelPendingClick(zoneId: String, reason: String, status: String = "已取消") {
+        clearGestureWatchdog()
         clickPending.set(false)
         actionState.cancelClick()
         pendingClickZoneId = null
@@ -1737,6 +2113,30 @@ class ScreenAutomationService : AccessibilityService() {
             regions = overlayRegions(settings),
             visible = isTargetForeground(settings),
         )
+    }
+
+    private fun armGestureWatchdog(token: ActionToken, timeoutMs: Long = 4_000L, onTimeout: () -> Unit) {
+        clearGestureWatchdog()
+        pendingGestureToken = token
+        gestureWatchdog = Runnable {
+            if (pendingGestureToken == token) {
+                pendingGestureToken = null
+                gestureWatchdog = null
+                onTimeout()
+            }
+        }.also { mainHandler.postDelayed(it, timeoutMs) }
+    }
+
+    private fun finishGesture(token: ActionToken): Boolean {
+        if (pendingGestureToken != token) return false
+        clearGestureWatchdog()
+        return isActionCurrent(token)
+    }
+
+    private fun clearGestureWatchdog() {
+        gestureWatchdog?.let(mainHandler::removeCallbacks)
+        gestureWatchdog = null
+        pendingGestureToken = null
     }
 
     private fun isTargetForeground(settings: AutomationSettings): Boolean =
@@ -1882,6 +2282,19 @@ class ScreenAutomationService : AccessibilityService() {
             }
         }
         return hash
+    }
+
+    private fun numberMonitorSignature(bitmap: Bitmap, region: RecognitionRegion): NumberRegionSignature {
+        val normalized = region.normalized()
+        return numberRegionSignature(
+            width = bitmap.width,
+            height = bitmap.height,
+            left = normalized.left,
+            top = normalized.top,
+            right = normalized.right,
+            bottom = normalized.bottom,
+            pixelAt = bitmap::getPixel,
+        )
     }
 
     private fun visualTargetSignature(zone: RecognitionZone): Int = zone.targets
@@ -2088,6 +2501,7 @@ class ScreenAutomationService : AccessibilityService() {
         private var visionQueuedAt = 0L
         private var logged = false
 
+        var session: AutomationSession? = null
         var captureMs = 0L
         var bitmapConversionMs = 0L
         var fingerprintMs = 0L
@@ -2182,6 +2596,22 @@ class ScreenAutomationService : AccessibilityService() {
         val match: VisualMatch?,
         val createdAt: Long,
         val calibrationObserved: Boolean = false,
+    )
+
+    private data class NumberTrackerKey(
+        val foregroundPackage: String?,
+        val targetPackage: String,
+        val enabled: Boolean,
+        val monitorEnabled: Boolean,
+        val region: RecognitionRegion,
+        val threshold: Float,
+        val upperLimit: Float,
+        val colorFilterEnabled: Boolean,
+        val colorHex: String,
+        val colorTolerance: Int,
+        val absenceTimeoutMs: Long,
+        val triggerZoneId: String?,
+        val triggerDelayMs: Long,
     )
 
     private data class OverlayRegion(
@@ -2313,6 +2743,7 @@ class ScreenAutomationService : AccessibilityService() {
         private const val NOTIFICATION_REFRESH_MS = 1_000L
         private const val UNAVAILABLE_REFERENCE_RETRY_MS = 30_000L
         private const val POST_SWIPE_SETTLE_MS = 900L
+        private const val NUMBER_CONFIRMATION_SCAN_DELAY_MS = 250L
         private const val HIGH_CONFIDENCE_MARGIN = 0.10f
         private const val CIRCLE_X_SAFE_HALF_RATIO = 0.06f
         private const val BACK_ARROW_SAFE_HALF_RATIO = 0.08f

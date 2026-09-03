@@ -8,42 +8,82 @@ data class DailyTriggerCount(val date: String, val count: Int)
 object DailyTriggerStats {
     private const val PREFS = "daily_trigger_stats"
     private const val KEY_COUNTS = "counts_v1"
-    private const val RETENTION_DAYS = 120
+    private const val RETENTION_DAYS = 3
+    private val preferencesLock = Any()
 
     fun recordCompletedSwipe(context: Context, date: LocalDate = LocalDate.now()): Int {
         val preferences = context.getSharedPreferences(PREFS, Context.MODE_PRIVATE)
-        val updated = incrementDailyCounts(preferences.getString(KEY_COUNTS, null), date, RETENTION_DAYS)
-        preferences.edit().putString(KEY_COUNTS, encodeDailyCounts(updated)).apply()
-        return updated[date.toString()] ?: 0
+        return synchronized(preferencesLock) {
+            val updated = incrementDailyCounts(preferences.getString(KEY_COUNTS, null), date, RETENTION_DAYS)
+            preferences.edit().putString(KEY_COUNTS, encodeDailyCounts(updated)).apply()
+            updated[date.toString()] ?: 0
+        }
     }
 
     fun recent(context: Context, limit: Int = 14): List<DailyTriggerCount> {
-        val raw = context.getSharedPreferences(PREFS, Context.MODE_PRIVATE).getString(KEY_COUNTS, null)
-        return decodeDailyCounts(raw)
-            .entries
-            .sortedByDescending { it.key }
-            .take(limit.coerceIn(1, 120))
-            .map { DailyTriggerCount(it.key, it.value) }
+        val preferences = context.getSharedPreferences(PREFS, Context.MODE_PRIVATE)
+        return synchronized(preferencesLock) {
+            val counts = readAndPrune(preferences, LocalDate.now())
+            counts.entries
+                .sortedByDescending { it.key }
+                .take(limit.coerceAtLeast(0))
+                .map { DailyTriggerCount(it.key, it.value) }
+        }
     }
 
-    fun today(context: Context): Int = recent(context, RETENTION_DAYS)
-        .firstOrNull { it.date == LocalDate.now().toString() }
-        ?.count
-        ?: 0
+    /** Returns today, yesterday and the day before, including zero-count days. */
+    fun lastThreeDays(context: Context, today: LocalDate = LocalDate.now()): List<DailyTriggerCount> {
+        val preferences = context.getSharedPreferences(PREFS, Context.MODE_PRIVATE)
+        return synchronized(preferencesLock) {
+            dailyCountsForDays(readAndPrune(preferences, today), today, RETENTION_DAYS)
+        }
+    }
+
+    fun today(context: Context): Int = lastThreeDays(context).first().count
+
+    private fun readAndPrune(preferences: android.content.SharedPreferences, today: LocalDate): Map<String, Int> {
+        val raw = preferences.getString(KEY_COUNTS, null)
+        val pruned = pruneDailyCounts(raw, today, RETENTION_DAYS)
+        val encoded = encodeDailyCounts(pruned)
+        if (raw != encoded) preferences.edit().putString(KEY_COUNTS, encoded).apply()
+        return pruned
+    }
 }
 
 internal fun incrementDailyCounts(
     raw: String?,
     date: LocalDate,
-    retentionDays: Int = 120,
+    retentionDays: Int = 3,
 ): Map<String, Int> {
-    val oldest = date.minusDays((retentionDays - 1).coerceAtLeast(0).toLong())
-    val counts = decodeDailyCounts(raw)
-        .filterKeys { key -> runCatching { LocalDate.parse(key) >= oldest }.getOrDefault(false) }
-        .toMutableMap()
+    val counts = pruneDailyCounts(raw, date, retentionDays).toMutableMap()
     val key = date.toString()
     counts[key] = (counts[key] ?: 0) + 1
     return counts.toSortedMap()
+}
+
+internal fun pruneDailyCounts(
+    raw: String?,
+    today: LocalDate,
+    retentionDays: Int = 3,
+): Map<String, Int> {
+    if (retentionDays <= 0) return emptyMap()
+    val oldest = today.minusDays((retentionDays - 1).toLong())
+    return decodeDailyCounts(raw)
+        .mapNotNull { (key, count) ->
+            val date = runCatching { LocalDate.parse(key) }.getOrNull() ?: return@mapNotNull null
+            if (date in oldest..today) key to count else null
+        }
+        .toMap()
+        .toSortedMap()
+}
+
+internal fun dailyCountsForDays(
+    counts: Map<String, Int>,
+    today: LocalDate,
+    days: Int = 3,
+): List<DailyTriggerCount> = (0 until days.coerceAtLeast(0)).map { offset ->
+    val date = today.minusDays(offset.toLong()).toString()
+    DailyTriggerCount(date, counts[date] ?: 0)
 }
 
 internal fun decodeDailyCounts(raw: String?): Map<String, Int> = raw
