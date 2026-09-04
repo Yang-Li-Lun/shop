@@ -69,3 +69,5 @@ $env:JAVA_TOOL_OPTIONS = '-Djdk.net.unixdomain.tmpdir=D:\codee\shop\app\build\ud
 - 版本號從 `1.0` 開始（對應 Android `versionName`；初始 `versionCode` 使用 `1`）。每次交付 APK 都必須更新版本號；除非使用者明確提出，否則不得修改大版本號，只遞增小版本號與對應的 `versionCode`。
 - 版本號有更新時，必須將新建置的 APK 安裝到目前授權且連接中的 Android 手機，並完成啟動與基本功能／崩潰檢查後才算交付完成。
 - 專案根目錄的 `APK` 資料夾是 APK 專用保存位置。每次產生新 APK 都必須將新版本複製／保存到 `APK` 資料夾，檔名須包含版本號，不得覆蓋既有 APK。
+- 每次生成並交付 APK 都必須建立對應的 Git commit 與版本 tag，tag 使用相同版本號（例如 APK `shop-v1.1.apk` 對應 tag `v1.1`），確保日後可以由該 tag 回退到完全相符的程式碼版本。
+- 交付前須確認 APK、版本號、Git tag 與保存位置一致；歷版 APK、Git commit 與 tag 必須保留，不得刪除或覆蓋。

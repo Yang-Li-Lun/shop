@@ -2337,12 +2337,18 @@ class ScreenAutomationService : AccessibilityService() {
             removeRecognitionRegionOverlay()
             return
         }
+        val screenMetrics = gestureDisplayMetrics()
         recognitionRegionOverlayView?.let {
+            it.setScreenSize(screenMetrics.widthPixels, screenMetrics.heightPixels)
             it.setRegions(regions)
             return
         }
 
-        val overlay = RecognitionRegionOverlayView(this).apply { setRegions(regions) }
+        val overlay = RecognitionRegionOverlayView(
+            context = this,
+            screenWidth = screenMetrics.widthPixels,
+            screenHeight = screenMetrics.heightPixels,
+        ).apply { setRegions(regions) }
         val params = WindowManager.LayoutParams(
             WindowManager.LayoutParams.MATCH_PARENT,
             WindowManager.LayoutParams.MATCH_PARENT,
@@ -2646,7 +2652,11 @@ class ScreenAutomationService : AccessibilityService() {
         }
     }
 
-    private class RecognitionRegionOverlayView(context: Context) : View(context) {
+    private class RecognitionRegionOverlayView(
+        context: Context,
+        private var screenWidth: Int,
+        private var screenHeight: Int,
+    ) : View(context) {
         private val density = resources.displayMetrics.density
         private val framePaint = Paint(Paint.ANTI_ALIAS_FLAG).apply {
             style = Paint.Style.STROKE
@@ -2668,6 +2678,13 @@ class ScreenAutomationService : AccessibilityService() {
         }
         private var regions = emptyList<OverlayRegion>()
 
+        fun setScreenSize(width: Int, height: Int) {
+            if (screenWidth == width && screenHeight == height) return
+            screenWidth = width
+            screenHeight = height
+            invalidate()
+        }
+
         fun setRegions(values: List<OverlayRegion>) {
             val normalized = values.map { it.copy(region = it.region.normalized()) }
             if (normalized == regions) return
@@ -2678,13 +2695,21 @@ class ScreenAutomationService : AccessibilityService() {
         override fun onDraw(canvas: Canvas) {
             super.onDraw(canvas)
             val inset = framePaint.strokeWidth / 2f
+            val location = IntArray(2)
+            getLocationOnScreen(location)
             regions.forEachIndexed { index, item ->
-                val region = item.region
+                val region = mapRecognitionRegionToOverlay(
+                    region = item.region,
+                    screenWidth = screenWidth,
+                    screenHeight = screenHeight,
+                    overlayLeft = location[0],
+                    overlayTop = location[1],
+                )
                 framePaint.color = frameColors[index % frameColors.size]
-                val left = (width * region.left).coerceAtLeast(inset)
-                val top = (height * region.top).coerceAtLeast(inset)
-                val right = (width * region.right).coerceAtMost(width - inset)
-                val bottom = (height * region.bottom).coerceAtMost(height - inset)
+                val left = region.left.coerceAtLeast(inset)
+                val top = region.top.coerceAtLeast(inset)
+                val right = region.right.coerceAtMost(width - inset)
+                val bottom = region.bottom.coerceAtMost(height - inset)
                 canvas.drawRect(left, top, right, bottom, framePaint)
                 if (item.showSimilarity || item.statusText != null) {
                     drawSimilarityLabel(canvas, item, index, left, top, right, bottom)
