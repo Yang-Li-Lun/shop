@@ -4,6 +4,8 @@ CSC 是一個 Android 10+ 的本機多區域螢幕辨識／自動點擊工具。
 
 Android 套件識別碼為 `com.example.csc`。
 
+目前交付版本為 **1.14**：回復 **1.12 數字辨識方式**，保留最新版介面、設定與 session／手勢保護。完整架構、設定契約、建置安裝及回退方式見 [工程交接文件](ENGINEERING_HANDOFF_CSC_1.14.md)，本次測試與裝置結果見 [驗證紀錄](docs/verification/CSC-1.14.md)。對應原始碼標籤為 `v1.14`。
+
 ## 功能
 
 - 指定文字：先搜尋畫面的 accessibility 節點；找不到時以 ML Kit OCR 辨識中文字或拉丁文字。
@@ -18,20 +20,21 @@ Android 套件識別碼為 `com.example.csc`。
 - 圖片區域會顯示目前最高相似度；符號比對採亮度正規化的邊緣形狀分數，適合箭頭、叉與圈等簡單圖示。
 - OCR 會優先限制在文字與數字監控區域，減少整張螢幕辨識造成的耗電與誤判。
 - 數字監控會保存最近可靠值與數字區域影像簽章；低值／高值需三次同方向觀察且跨至少 500 毫秒，缺失倒數到期也必須重新擷取並再次確認。
+- 數字辨識採 1.12 的純數字元素組合及 32×32 ROI 指紋；混合文字元素不抽取數字。辨識失敗且 ROI 已變更時，沿用 1.12 的缺失等待與再次確認規則。
 - 點擊後的優先上滑等待期間只允許該優先規則安排手勢，一般數字規則不會並行排程。
 - 偵測服務停用時會停止輪詢；回到目標 App 以外的畫面時會降低掃描頻率。
 - 最終點擊入口會再次驗證座標，區域外手勢一律拒絕。
-- 命中門檻：圖片模式可設定 55–99%；圓圈＋X與返回箭頭共用可設定的 50–99% 圖形門檻。
+- 命中門檻：圖片模式可設定 55–99%；圓圈＋X與返回箭頭各有可設定的 50–99% 圖形門檻。
 - 安全停止：停用主畫面開關，或從持續通知點「立即停止」。
 - 隱私：截圖與辨識全部留在裝置上；使用的是隨 App 打包的 ML Kit 模型。
 - Android 10 透過使用者明確允許的 `MediaProjection` 前景服務擷取；Android 11+ 直接使用 Accessibility 截圖 API。
 
 ## 建置與安裝
 
-需求：Android Studio（JDK 17）、Android SDK 36、Android 10 或更新的實機／模擬器。
+需求：Android SDK 36、相容 Gradle 9.5／AGP 9.3 的 JDK（本次驗證為 JDK 21，Java 編譯相容性為 17）、Android 10 或更新的實機／模擬器。
 
 1. 使用 Android Studio 開啟本資料夾並等待 Gradle Sync。
-2. 執行 `./gradlew assembleDebug`（Windows 使用 `gradlew.bat assembleDebug`）。
+2. 依 `AGENTS.md` 設定 repository-local `jdk.net.unixdomain.tmpdir`，執行 `./gradlew --no-daemon assembleDebug -PtargetAbi=arm64-v8a`（Windows 使用 `gradlew.bat`）。
 3. 安裝 `app/build/outputs/apk/debug/app-debug.apk`。
 4. 首次開啟後按「開啟無障礙服務」，選擇「CSC 螢幕辨識」並允許。
 5. 輸入文字或選擇參考圖片，開啟「啟用自動辨識」，再切換到目標 App。

@@ -322,7 +322,7 @@ class RecognitionZoneTest {
     }
 
     @Test
-    fun mixedOcrElementsKeepNumericSubstringAndConservativeElementBounds() {
+    fun mixedOcrElementsAreRejectedLikeVersion112() {
         val tokens = rebuildNumberTokens(
             listOf(
                 NumberTextElement("S0.2", ClickBounds(10f, 10f, 42f, 24f)),
@@ -331,9 +331,17 @@ class RecognitionZoneTest {
             ),
         )
 
-        assertEquals(listOf("0.2", "0.2", "0.2"), tokens.map { it.text })
-        assertEquals(10f, tokens.first().bounds.left)
-        assertEquals(42f, tokens.first().bounds.right)
+        assertTrue(tokens.isEmpty())
+    }
+
+    @Test
+    fun nonNumericElementSeparatesNearbyNumbersLikeVersion112() {
+        val tokens = rebuildNumberTokens(listOf(
+            NumberTextElement("0.2", ClickBounds(10f, 10f, 30f, 24f)),
+            NumberTextElement("元", ClickBounds(31f, 10f, 40f, 24f)),
+            NumberTextElement("3", ClickBounds(41f, 10f, 51f, 24f)),
+        ))
+        assertEquals(listOf("0.2", "3"), tokens.map { it.text })
     }
 
     @Test

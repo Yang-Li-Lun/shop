@@ -18,17 +18,12 @@ class NumberMonitorTrackerTest {
     ): NumberMonitorAction = tracker.observe(
         nowMs = nowMs,
         observation = observation,
-        roiSignature = signature(roiFingerprint),
+        roiFingerprint = roiFingerprint,
         threshold = stayThreshold,
         upperLimit = upperLimit,
         absenceTimeoutMs = timeoutMs,
         prioritySwipePending = priority,
         generation = generation,
-    )
-
-    private fun signature(value: Long): NumberRegionSignature = NumberRegionSignature(
-        ByteArray(256) { (value * 15L).toByte() },
-        LongArray(4) { value * 15L },
     )
 
     @Test
@@ -146,10 +141,22 @@ class NumberMonitorTrackerTest {
     }
 
     @Test
-    fun invalidNeverStartsOrAdvancesAbsence() {
+    fun invalidOnUnchangedReliableRoiOnlyRequestsFreshObservation() {
         val tracker = NumberMonitorTracker()
-        assertEquals(NumberMonitorAction.REQUEST_FRESH_OBSERVATION, observe(tracker, 0L, NumberMonitorTracker.Observation.Invalid, 1L))
-        assertEquals(NumberMonitorAction.REQUEST_FRESH_OBSERVATION, observe(tracker, 2_000L, NumberMonitorTracker.Observation.Invalid, 2L))
-        assertEquals(NumberMonitorAction.STAY, tracker.onAbsenceDeadline(10_000L))
+        observe(tracker, 0L, NumberMonitorTracker.Observation.Value(0.20), 7L)
+        assertEquals(NumberMonitorAction.REQUEST_FRESH_OBSERVATION,
+            observe(tracker, 100L, NumberMonitorTracker.Observation.Invalid, 7L))
+        assertEquals(NumberMonitorAction.STAY, tracker.onAbsenceDeadline(2_000L))
+    }
+
+    @Test
+    fun invalidOnChangedRoiUsesVersion112AbsenceConfirmation() {
+        val tracker = NumberMonitorTracker()
+        observe(tracker, 0L, NumberMonitorTracker.Observation.Value(0.20), 7L)
+        assertEquals(NumberMonitorAction.START_OR_KEEP_ABSENCE,
+            observe(tracker, 100L, NumberMonitorTracker.Observation.Invalid, 8L))
+        assertEquals(NumberMonitorAction.REQUEST_FRESH_OBSERVATION, tracker.onAbsenceDeadline(1_100L))
+        assertEquals(NumberMonitorAction.SWIPE_ABSENT,
+            observe(tracker, 1_101L, NumberMonitorTracker.Observation.Invalid, 8L))
     }
 }

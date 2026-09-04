@@ -28,7 +28,7 @@ class NumberMonitorTracker {
     private data class LastKnownGood(
         val value: Double,
         val observedAtMs: Long,
-        val roiSignature: NumberRegionSignature,
+        val roiFingerprint: Long,
     )
 
     private var activeGeneration = 0L
@@ -47,7 +47,7 @@ class NumberMonitorTracker {
     fun observe(
         nowMs: Long,
         observation: Observation,
-        roiSignature: NumberRegionSignature,
+        roiFingerprint: Long,
         threshold: Float,
         upperLimit: Float = 999_999f,
         absenceTimeoutMs: Long = 2_000L,
@@ -65,17 +65,14 @@ class NumberMonitorTracker {
             value + NUMBER_BOUNDARY_EPSILON >= threshold &&
             value - NUMBER_BOUNDARY_EPSILON <= upperLimit
         ) {
-            lastKnownGood = LastKnownGood(value, nowMs, roiSignature)
+            lastKnownGood = LastKnownGood(value, nowMs, roiFingerprint)
             clearRiskAndAbsence()
             return Action.STAY
         }
 
-        // Invalid means the recognizer failed; it is never evidence that the number disappeared.
-        if (observation is Observation.Invalid) return Action.REQUEST_FRESH_OBSERVATION
-
         // A static ROI that was previously accepted is stronger evidence than one bad OCR
         // result. Require a fresh OCR pass, and never start an absence deadline from it.
-        if (lastKnownGood?.roiSignature?.isApproximatelySame(roiSignature) == true) {
+        if (lastKnownGood?.roiFingerprint == roiFingerprint) {
             clearRiskAndAbsence()
             return Action.REQUEST_FRESH_OBSERVATION
         }

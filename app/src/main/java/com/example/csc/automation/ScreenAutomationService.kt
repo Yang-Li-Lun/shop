@@ -1215,7 +1215,7 @@ class ScreenAutomationService : AccessibilityService() {
             !isSessionCurrent(capturedSession)
         ) return
         syncNumberTrackerGeneration(settings, capturePackage)
-        val roiSignature = numberMonitorSignature(bitmap, settings.numberMonitorRegion)
+        val roiFingerprint = numberMonitorFingerprint(bitmap, settings.numberMonitorRegion)
         val filterColor = if (settings.numberColorFilterEnabled) {
             runCatching { Color.parseColor(settings.numberColorHex.trim()) }.getOrNull()
         } else {
@@ -1324,7 +1324,7 @@ class ScreenAutomationService : AccessibilityService() {
         val trackerAction = numberMonitorTracker.observe(
             nowMs = SystemClock.elapsedRealtime(),
             observation = observedNumber,
-            roiSignature = roiSignature,
+            roiFingerprint = roiFingerprint,
             threshold = settings.numberMonitorThreshold,
             upperLimit = settings.numberMonitorUpperLimit,
             absenceTimeoutMs = settings.numberAbsenceTimeoutMs,
@@ -1407,7 +1407,7 @@ class ScreenAutomationService : AccessibilityService() {
         val action = numberMonitorTracker.observe(
             nowMs = SystemClock.elapsedRealtime(),
             observation = NumberMonitorTracker.Observation.Invalid,
-            roiSignature = numberMonitorSignature(bitmap, settings.numberMonitorRegion),
+            roiFingerprint = numberMonitorFingerprint(bitmap, settings.numberMonitorRegion),
             threshold = settings.numberMonitorThreshold,
             upperLimit = settings.numberMonitorUpperLimit,
             absenceTimeoutMs = settings.numberAbsenceTimeoutMs,
@@ -2284,9 +2284,9 @@ class ScreenAutomationService : AccessibilityService() {
         return hash
     }
 
-    private fun numberMonitorSignature(bitmap: Bitmap, region: RecognitionRegion): NumberRegionSignature {
+    private fun numberMonitorFingerprint(bitmap: Bitmap, region: RecognitionRegion): Long {
         val normalized = region.normalized()
-        return numberRegionSignature(
+        return numberRegionFingerprint(
             width = bitmap.width,
             height = bitmap.height,
             left = normalized.left,

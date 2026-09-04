@@ -1,7 +1,7 @@
 package com.example.csc.automation
 
-import org.junit.Assert.assertFalse
-import org.junit.Assert.assertTrue
+import org.junit.Assert.assertEquals
+import org.junit.Assert.assertNotEquals
 import org.junit.Test
 
 class NumberRegionFingerprintTest {
@@ -9,7 +9,7 @@ class NumberRegionFingerprintTest {
     fun changesOutsideRoiDoNotChangeSignature() {
         val outsideColor = 0xff000000.toInt()
         val insideColor = 0xffffffff.toInt()
-        fun signature(outsideChanged: Boolean): NumberRegionSignature = numberRegionSignature(
+        fun signature(outsideChanged: Boolean): Long = numberRegionFingerprint(
             width = 100,
             height = 100,
             left = 0.2f,
@@ -21,14 +21,14 @@ class NumberRegionFingerprintTest {
             },
         )
 
-        assertTrue(signature(false).distance(signature(true)).isApproximatelySame)
+        assertEquals(signature(false), signature(true))
     }
 
     @Test
     fun aSmallGlyphChangeInsideRoiChangesSignature() {
         val background = 0xff000000.toInt()
         val glyph = 0xffffffff.toInt()
-        fun signature(withGlyph: Boolean): NumberRegionSignature = numberRegionSignature(
+        fun signature(withGlyph: Boolean): Long = numberRegionFingerprint(
             width = 100,
             height = 100,
             left = 0.2f,
@@ -40,26 +40,6 @@ class NumberRegionFingerprintTest {
             },
         )
 
-        assertFalse(signature(false).distance(signature(true)).isApproximatelySame)
-    }
-
-    @Test
-    fun smallBackgroundChangeIsSimilarButGlyphChangeIsDetected() {
-        fun signature(glyph: Boolean, background: Int): NumberRegionSignature = numberRegionSignature(
-            width = 120,
-            height = 80,
-            left = 0.1f,
-            top = 0.1f,
-            right = 0.9f,
-            bottom = 0.9f,
-            pixelAt = { x, y ->
-                if (glyph && x in 53..59 && y in 34..43) 0xffffffff.toInt() else background
-            },
-        )
-        val stable = signature(false, 0xff101010.toInt())
-        val animated = signature(false, 0xff181818.toInt())
-        val changed = signature(true, 0xff101010.toInt())
-        assertTrue(stable.distance(animated).isApproximatelySame)
-        assertFalse(stable.distance(changed).isApproximatelySame)
+        assertNotEquals(signature(false), signature(true))
     }
 }

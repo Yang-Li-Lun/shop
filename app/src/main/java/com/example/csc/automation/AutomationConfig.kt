@@ -196,10 +196,8 @@ internal data class NumberTextToken(
 
 /** Rebuilds decimal tokens when ML Kit splits a glyph sequence into separate elements. */
 internal fun rebuildNumberTokens(elements: List<NumberTextElement>): List<NumberTextToken> {
-    val orderedElements = elements
-        .flatMap { element -> numericFragments(element.text).map { element.copy(text = it) } }
-        .sortedBy { it.bounds.left }
-    if (orderedElements.isEmpty()) return emptyList()
+    val orderedElements = elements.sortedBy { it.bounds.left }
+    if (orderedElements.none { isNumericElement(it.text) }) return emptyList()
 
     val tokens = mutableListOf<NumberTextToken>()
     var currentText = ""
@@ -215,6 +213,11 @@ internal fun rebuildNumberTokens(elements: List<NumberTextElement>): List<Number
     }
 
     orderedElements.forEach { element ->
+        if (!isNumericElement(element.text)) {
+            flush()
+            previous = null
+            return@forEach
+        }
         val canJoin = previous?.let { prior -> numberElementsCanJoin(prior, element) } == true
         if (!canJoin) flush()
         currentText += element.text.filterNot(Char::isWhitespace)
@@ -225,11 +228,12 @@ internal fun rebuildNumberTokens(elements: List<NumberTextElement>): List<Number
     return tokens
 }
 
-private fun numericFragments(text: String): List<String> =
-    Regex("[-+]?\\d+(?:[.,]\\d*)?|[.,]\\d+|[.,]")
-        .findAll(text.filterNot(Char::isWhitespace))
-        .map { it.value }
-        .toList()
+private fun isNumericElement(text: String): Boolean {
+    val normalized = text.filterNot(Char::isWhitespace)
+    return normalized.isNotEmpty() &&
+        (normalized.any(Char::isDigit) || normalized == "." || normalized == ",") &&
+        normalized.all { it.isDigit() || it == '.' || it == ',' || it == '+' || it == '-' }
+}
 
 private fun numberElementsCanJoin(first: NumberTextElement, second: NumberTextElement): Boolean {
     val firstHeight = first.bounds.bottom - first.bounds.top
