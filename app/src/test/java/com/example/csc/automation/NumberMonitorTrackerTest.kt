@@ -83,7 +83,18 @@ class NumberMonitorTrackerTest {
     fun absenceDeadlineRequiresFreshMissingObservation() {
         val tracker = NumberMonitorTracker()
         assertEquals(NumberMonitorAction.START_OR_KEEP_ABSENCE, observe(tracker, 0L, NumberMonitorTracker.Observation.Missing, 1L))
+        assertEquals(
+            NumberMonitorTracker.AbsenceSnapshot(
+                startedAtMs = 0L,
+                deadlineMs = 1_000L,
+                observations = 1,
+                confirmationDue = false,
+            ),
+            tracker.absenceSnapshot(),
+        )
         assertEquals(NumberMonitorAction.REQUEST_FRESH_OBSERVATION, tracker.onAbsenceDeadline(1_000L))
+        assertEquals(1_000L, tracker.absenceSnapshot().deadlineMs)
+        assertEquals(true, tracker.absenceSnapshot().confirmationDue)
         assertEquals(NumberMonitorAction.SWIPE_ABSENT, observe(tracker, 1_001L, NumberMonitorTracker.Observation.Missing, 2L))
     }
 

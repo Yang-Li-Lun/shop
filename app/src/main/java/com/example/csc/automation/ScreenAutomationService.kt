@@ -126,6 +126,7 @@ class ScreenAutomationService : AccessibilityService() {
     private var numberPriorityPassPending = false
     private var numberTrackerGeneration = 0L
     private var numberObservationSequence = 0L
+    private var swipeActionSequence = 0L
     private var numberTrackerKey: NumberTrackerKey? = null
     private val gestureTerminalCoordinator = GestureTerminalCoordinator()
     private var gestureWatchdog: Runnable? = null
@@ -1215,58 +1216,30 @@ class ScreenAutomationService : AccessibilityService() {
         line: Text.Line,
         offsetX: Int,
         offsetY: Int,
-    ): NumberLineEvidence {
-        val numberElements = mutableListOf<NumberTextElement>()
-        var hasNumericText = hasPotentialNumberText(line.text)
-        var missingNumericBounds = false
-        line.elements.forEach { element ->
-            val elementHasNumericText = hasPotentialNumberText(element.text)
-            hasNumericText = hasNumericText || elementHasNumericText
-            val symbols = element.symbols
-            if (symbols.isNotEmpty()) {
-                if (elementHasNumericText && symbols.none { hasPotentialNumberText(it.text) }) {
-                    missingNumericBounds = true
-                }
-                symbols.forEach { symbol ->
-                    val symbolHasNumericText = hasPotentialNumberText(symbol.text)
-                    val bounds = symbol.boundingBox
-                    if (symbolHasNumericText) {
-                        hasNumericText = true
-                        if (bounds == null) missingNumericBounds = true
-                    }
-                    bounds?.offsetCopy(offsetX, offsetY)?.let { offsetBounds ->
-                        numberElements += NumberTextElement(
-                            text = symbol.text,
-                            bounds = ClickBounds(
-                                offsetBounds.left.toFloat(),
-                                offsetBounds.top.toFloat(),
-                                offsetBounds.right.toFloat(),
-                                offsetBounds.bottom.toFloat(),
-                            ),
-                        )
-                    }
-                }
-            } else {
-                val bounds = element.boundingBox
-                if (elementHasNumericText) {
-                    if (bounds == null) missingNumericBounds = true
-                    else hasNumericText = true
-                }
-                bounds?.offsetCopy(offsetX, offsetY)?.let { offsetBounds ->
-                    numberElements += NumberTextElement(
-                        text = element.text,
-                        bounds = ClickBounds(
-                            offsetBounds.left.toFloat(),
-                            offsetBounds.top.toFloat(),
-                            offsetBounds.right.toFloat(),
-                            offsetBounds.bottom.toFloat(),
-                        ),
+        numberRegion: RecognitionRegion,
+        bitmapWidth: Int,
+        bitmapHeight: Int,
+    ): NumberRoiEvidence {
+        val elements = line.elements.map { element ->
+            NumberTextNode(
+                text = element.text,
+                bounds = element.boundingBox?.offsetCopy(offsetX, offsetY)?.toClickBounds(),
+                children = element.symbols.map { symbol ->
+                    NumberTextNode(
+                        text = symbol.text,
+                        bounds = symbol.boundingBox?.offsetCopy(offsetX, offsetY)?.toClickBounds(),
                     )
-                }
-            }
+                },
+            )
         }
-        if (line.elements.isEmpty() && hasNumericText) missingNumericBounds = true
-        return NumberLineEvidence(numberElements, hasNumericText, missingNumericBounds)
+        return collectNumberRoiEvidence(
+            lineText = line.text,
+            lineBounds = line.boundingBox?.offsetCopy(offsetX, offsetY)?.toClickBounds(),
+            elements = elements,
+            numberRegion = numberRegion,
+            bitmapWidth = bitmapWidth,
+            bitmapHeight = bitmapHeight,
+        )
     }
 
     private fun observeNumbers(
@@ -1300,10 +1273,19 @@ class ScreenAutomationService : AccessibilityService() {
         var hasNumericText = false
         var numericTextMissingBounds = false
         var numericTextParseAmbiguous = false
+        val numericLocations = linkedSetOf<NumberRoiLocation>()
         result.textBlocks.flatMap { it.lines }.forEach { line ->
-            val lineEvidence = numberLineEvidence(line, offsetX, offsetY)
+            val lineEvidence = numberLineEvidence(
+                line = line,
+                offsetX = offsetX,
+                offsetY = offsetY,
+                numberRegion = settings.numberMonitorRegion,
+                bitmapWidth = bitmap.width,
+                bitmapHeight = bitmap.height,
+            )
             hasNumericText = hasNumericText || lineEvidence.hasNumericText
             numericTextMissingBounds = numericTextMissingBounds || lineEvidence.missingNumericBounds
+            numericLocations += lineEvidence.numericLocations
             val tokens = rebuildNumberTokens(lineEvidence.elements)
             if (tokens.isEmpty()) {
                 if (lineEvidence.hasNumericText) {
@@ -1330,6 +1312,9 @@ class ScreenAutomationService : AccessibilityService() {
             }
         }
         if (numericTextMissingBounds) invalidReasons += NumberMonitorTracker.InvalidReason.MISSING_BOUNDS
+        if (NumberRoiLocation.CROSSING in numericLocations) {
+            invalidReasons += NumberMonitorTracker.InvalidReason.OUTSIDE_ROI
+        }
         if (numericTextParseAmbiguous) invalidReasons += NumberMonitorTracker.InvalidReason.PARSE_AMBIGUOUS
         val normalizedMonitorRegion = settings.numberMonitorRegion.normalized()
         val monitorCenterX = (normalizedMonitorRegion.left + normalizedMonitorRegion.right) / 2f
@@ -1407,7 +1392,8 @@ class ScreenAutomationService : AccessibilityService() {
             generation = numberTrackerGeneration,
         )
         val invalidReason = (observedNumber as? NumberMonitorTracker.Observation.Invalid)?.reason
-        numberObservationSequence++
+        val decisionId = ++numberObservationSequence
+        val absenceSnapshot = numberMonitorTracker.absenceSnapshot()
         val observationLabel = when (observedNumber) {
             is NumberMonitorTracker.Observation.Value -> "VALUE"
             NumberMonitorTracker.Observation.Missing -> "MISSING"
@@ -1418,7 +1404,11 @@ class ScreenAutomationService : AccessibilityService() {
             "id=$numberObservationSequence observation=$observationLabel " +
                 "reason=${invalidReason?.displayName ?: "-"} candidates=${candidates.size} " +
                 "accepted=${values.size} numericText=$hasNumericText reasons=${invalidReasons.joinToString(",") { it.displayName }} " +
-                "tracker=$trackerAction roiFingerprint=$roiFingerprint",
+                "locations=${numericLocations.joinToString("|")} tracker=$trackerAction " +
+                "absenceStarted=${absenceSnapshot.startedAtMs ?: "-"} " +
+                "absenceDeadline=${absenceSnapshot.deadlineMs ?: "-"} " +
+                "missingCount=${absenceSnapshot.observations} " +
+                "confirmationDue=${absenceSnapshot.confirmationDue} roiFingerprint=$roiFingerprint",
         )
 
         if (priorityPending) {
@@ -1462,6 +1452,7 @@ class ScreenAutomationService : AccessibilityService() {
                 stayMessage = "數字 $maximum，停留目前頁面",
                 actionSession = capturedSession,
                 invalidReason = invalidReason,
+                decisionId = decisionId,
             )
             return
         }
@@ -1481,6 +1472,7 @@ class ScreenAutomationService : AccessibilityService() {
             stayMessage = null,
             actionSession = capturedSession,
             invalidReason = invalidReason,
+            decisionId = decisionId,
         )
     }
 
@@ -1506,11 +1498,16 @@ class ScreenAutomationService : AccessibilityService() {
             prioritySwipePending = prioritySwipePending.get(),
             generation = numberTrackerGeneration,
         )
-        numberObservationSequence++
+        val decisionId = ++numberObservationSequence
+        val absenceSnapshot = numberMonitorTracker.absenceSnapshot()
         Log.i(
             NUMBER_LOG_TAG,
-            "id=$numberObservationSequence observation=INVALID reason=${reason.displayName} " +
-                "tracker=$action roiFingerprint=${numberMonitorFingerprint(bitmap, settings.numberMonitorRegion)}",
+            "id=$decisionId observation=INVALID reason=${reason.displayName} tracker=$action " +
+                "absenceStarted=${absenceSnapshot.startedAtMs ?: "-"} " +
+                "absenceDeadline=${absenceSnapshot.deadlineMs ?: "-"} " +
+                "missingCount=${absenceSnapshot.observations} " +
+                "confirmationDue=${absenceSnapshot.confirmationDue} " +
+                "roiFingerprint=${numberMonitorFingerprint(bitmap, settings.numberMonitorRegion)}",
         )
         if (prioritySwipePending.get()) {
             updateDetectedNumberDisplay(displayText)
@@ -1534,6 +1531,7 @@ class ScreenAutomationService : AccessibilityService() {
             stayMessage = null,
             actionSession = capturedSession,
             invalidReason = reason,
+            decisionId = decisionId,
         )
     }
 
@@ -1548,7 +1546,16 @@ class ScreenAutomationService : AccessibilityService() {
         stayMessage: String?,
         actionSession: AutomationSession?,
         invalidReason: NumberMonitorTracker.InvalidReason? = null,
+        decisionId: Long? = null,
     ) {
+        val absenceSnapshot = numberMonitorTracker.absenceSnapshot()
+        Log.i(
+            NUMBER_ACTION_LOG_TAG,
+            "decisionId=${decisionId ?: "-"} action=$action phase=${actionState.phase} " +
+                "absenceStarted=${absenceSnapshot.startedAtMs ?: "-"} " +
+                "absenceDeadline=${absenceSnapshot.deadlineMs ?: "-"} " +
+                "missingCount=${absenceSnapshot.observations} reason=${invalidReason?.displayName ?: "-"}",
+        )
         when (action) {
             NumberMonitorAction.STAY -> {
                 resetNumberAbsenceTracking()
@@ -1567,7 +1574,12 @@ class ScreenAutomationService : AccessibilityService() {
             }
             NumberMonitorAction.START_OR_KEEP_ABSENCE -> {
                 updateDetectedNumberDisplay("${confirmedNumberDisplay.takeIf { it != "尚未開始" } ?: "無數字"}\n重新確認")
-                scheduleNumberWaitSwipe(absenceReason, settings.numberAbsenceTimeoutMs, capturePackage)
+                scheduleNumberWaitSwipe(
+                    absenceReason,
+                    settings.numberAbsenceTimeoutMs,
+                    capturePackage,
+                    decisionId,
+                )
             }
             NumberMonitorAction.REQUEST_FRESH_OBSERVATION -> {
                 resetNumberAbsenceTracking()
@@ -1583,12 +1595,20 @@ class ScreenAutomationService : AccessibilityService() {
             NumberMonitorAction.SWIPE_LOW,
             NumberMonitorAction.SWIPE_HIGH,
             -> {
-                numberMonitorTracker.markActionConsumed()
-                scheduleSwipeUp(riskReason ?: "數字條件觸發上滑", actionSession = actionSession)
+                scheduleSwipeUp(
+                    riskReason ?: "數字條件觸發上滑",
+                    actionSession = actionSession,
+                    gestureActionId = decisionId?.let { "number-$it" },
+                    onHandoff = numberMonitorTracker::markActionConsumed,
+                )
             }
             NumberMonitorAction.SWIPE_ABSENT -> {
-                numberMonitorTracker.markActionConsumed()
-                scheduleSwipeUp("$absenceReason；期限點仍無數字", actionSession = actionSession)
+                scheduleSwipeUp(
+                    "$absenceReason；期限點仍無數字",
+                    actionSession = actionSession,
+                    gestureActionId = decisionId?.let { "number-$it" },
+                    onHandoff = numberMonitorTracker::markActionConsumed,
+                )
             }
         }
     }
@@ -1713,18 +1733,36 @@ class ScreenAutomationService : AccessibilityService() {
         lastResult = "等待期限點重新辨識"
     }
 
-    private fun scheduleNumberWaitSwipe(reason: String, waitMs: Long, observedPackage: String?) {
-        if (prioritySwipePending.get() || numberAbsenceRunnable != null) return
-        val waitSeconds = formatSeconds(waitMs)
+    private fun scheduleNumberWaitSwipe(
+        reason: String,
+        waitMs: Long,
+        observedPackage: String?,
+        decisionId: Long? = null,
+    ) {
+        if (prioritySwipePending.get() || numberAbsenceRunnable != null) {
+            Log.i(
+                NUMBER_ACTION_LOG_TAG,
+                "decisionId=${decisionId ?: "-"} stage=absence_schedule_blocked " +
+                    "priority=${prioritySwipePending.get()} alreadyScheduled=${numberAbsenceRunnable != null}",
+            )
+            return
+        }
+        val scheduledAtMs = SystemClock.elapsedRealtime()
+        val absenceSnapshot = numberMonitorTracker.absenceSnapshot()
+        val deadlineMs = absenceSnapshot.deadlineMs ?: scheduledAtMs + waitMs.coerceAtLeast(0L)
+        val effectiveWaitMs = (deadlineMs - scheduledAtMs).coerceAtLeast(0L)
+        val waitSeconds = formatSeconds(effectiveWaitMs)
         val scheduledGeneration = numberTrackerGeneration
         val runnable = Runnable {
             numberAbsenceRunnable = null
             val current = AutomationConfig.read(this)
             if (prioritySwipePending.get()) {
+                Log.i(NUMBER_ACTION_LOG_TAG, "decisionId=${decisionId ?: "-"} stage=absence_deadline_cancelled reason=priority")
                 resetNumberAbsenceTracking()
                 return@Runnable
             }
             if (isAnyRecognitionHoldingNumberCountdown(current)) {
+                Log.i(NUMBER_ACTION_LOG_TAG, "decisionId=${decisionId ?: "-"} stage=absence_deadline_cancelled reason=hold")
                 resetNumberAbsenceTracking()
                 lastResult = "辨識區域仍有目標，上滑倒數維持重設"
                 return@Runnable
@@ -1735,13 +1773,23 @@ class ScreenAutomationService : AccessibilityService() {
             ) {
                 syncNumberTrackerGeneration(current, observedPackage)
                 if (scheduledGeneration != numberTrackerGeneration) {
+                    Log.i(NUMBER_ACTION_LOG_TAG, "decisionId=${decisionId ?: "-"} stage=absence_deadline_cancelled reason=generation")
                     resetNumberAbsenceTracking()
                     return@Runnable
                 }
-                when (numberMonitorTracker.onAbsenceDeadline(
+                val deadlineAction = numberMonitorTracker.onAbsenceDeadline(
                     SystemClock.elapsedRealtime(),
                     scheduledGeneration,
-                )) {
+                )
+                val deadlineSnapshot = numberMonitorTracker.absenceSnapshot()
+                Log.i(
+                    NUMBER_ACTION_LOG_TAG,
+                    "decisionId=${decisionId ?: "-"} stage=absence_deadline " +
+                        "action=$deadlineAction absenceStarted=${deadlineSnapshot.startedAtMs ?: "-"} " +
+                        "absenceDeadline=${deadlineSnapshot.deadlineMs ?: "-"} " +
+                        "missingCount=${deadlineSnapshot.observations}",
+                )
+                when (deadlineAction) {
                     NumberMonitorAction.REQUEST_FRESH_OBSERVATION -> {
                         resetNumberAbsenceTracking()
                         updateDetectedNumberDisplay("無數字\n重新確認")
@@ -1756,12 +1804,20 @@ class ScreenAutomationService : AccessibilityService() {
                     }
                     else -> resetNumberAbsenceTracking()
                 }
+            } else {
+                Log.i(NUMBER_ACTION_LOG_TAG, "decisionId=${decisionId ?: "-"} stage=absence_deadline_cancelled reason=context")
             }
         }
         numberAbsenceRunnable = runnable
-        mainHandler.postDelayed(runnable, waitMs)
+        mainHandler.postDelayed(runnable, effectiveWaitMs)
         lastResult = "$reason，等待 $waitSeconds 秒"
-        startNumberCountdown("$reason，等待上滑", waitMs)
+        startNumberCountdown("$reason，等待上滑", effectiveWaitMs)
+        Log.i(
+            NUMBER_ACTION_LOG_TAG,
+            "decisionId=${decisionId ?: "-"} stage=absence_scheduled " +
+                "absenceStarted=${absenceSnapshot.startedAtMs ?: "-"} " +
+                "absenceDeadline=$deadlineMs waitMs=$effectiveWaitMs generation=$scheduledGeneration",
+        )
     }
 
     private fun scheduleConfiguredTriggerSwipe(
@@ -1869,14 +1925,29 @@ class ScreenAutomationService : AccessibilityService() {
         reason: String,
         priority: Boolean = false,
         actionSession: AutomationSession? = null,
+        gestureActionId: String? = null,
+        onHandoff: (() -> Unit)? = null,
     ) {
-        if (!priority && prioritySwipePending.get()) return
+        val actionId = gestureActionId ?: "swipe-${++swipeActionSequence}"
+        if (!priority && prioritySwipePending.get()) {
+            logSwipeAction(actionId, "blocked", "reason=priority")
+            return
+        }
         if (clickPending.get()) {
-            mainHandler.postDelayed({ scheduleSwipeUp(reason, priority, actionSession) }, 100L)
+            mainHandler.postDelayed({
+                scheduleSwipeUp(
+                    reason = reason,
+                    priority = priority,
+                    actionSession = actionSession,
+                    gestureActionId = actionId,
+                    onHandoff = onHandoff,
+                )
+            }, 100L)
             return
         }
         val settings = AutomationConfig.read(this)
         if (!settings.enabled || !settings.numberMonitorEnabled || !isTargetForeground(settings)) {
+            logSwipeAction(actionId, "rejected", "reason=context")
             if (priority) {
                 prioritySwipePending.set(false)
                 clearPrioritySwipeTracking()
@@ -1891,11 +1962,14 @@ class ScreenAutomationService : AccessibilityService() {
             }
             swipePending.set(false)
             actionState.cancelSwipe()
+            onHandoff?.invoke()
             recordWouldAct("SWIPE", reason, wouldActZoneId)
+            logSwipeAction(actionId, "would-act", "priority=$priority")
             showOrHideNotification(settings)
             return
         }
         if (!swipePending.compareAndSet(false, true)) {
+            logSwipeAction(actionId, "blocked", "reason=already_pending")
             if (priority) {
                 prioritySwipePending.set(false)
                 clearPrioritySwipeTracking()
@@ -1903,6 +1977,7 @@ class ScreenAutomationService : AccessibilityService() {
             return
         }
         if (!actionState.armPrioritySwipe()) {
+            logSwipeAction(actionId, "rejected", "reason=phase phase=${actionState.phase}")
             swipePending.set(false)
             if (priority) {
                 prioritySwipePending.set(false)
@@ -1917,6 +1992,7 @@ class ScreenAutomationService : AccessibilityService() {
             sessionGate.token(null, null)
         }
         if (actionToken == null) {
+            logSwipeAction(actionId, "rejected", "reason=session")
             swipePending.set(false)
             if (priority) {
                 prioritySwipePending.set(false)
@@ -1925,10 +2001,12 @@ class ScreenAutomationService : AccessibilityService() {
             actionState.cancelSwipe()
             return
         }
+        onHandoff?.invoke()
         resetNumberAbsenceTracking()
         val spec = randomSwipeSpec(settings.randomClickMaxMs)
         val detectedPackage = foregroundPackage
         lastResult = "$reason；等待 ${spec.delayMs} ms 後向上滑"
+        logSwipeAction(actionId, "scheduled", "priority=$priority delayMs=${spec.delayMs} package=$detectedPackage")
         mainHandler.postDelayed({
             val current = AutomationConfig.read(this)
             if (
@@ -1936,6 +2014,7 @@ class ScreenAutomationService : AccessibilityService() {
                 !current.enabled || !current.numberMonitorEnabled ||
                 foregroundPackage != detectedPackage || !isTargetForeground(current)
             ) {
+                logSwipeAction(actionId, "cancelled", "reason=stale_or_context")
                 swipePending.set(false)
                 if (priority) {
                     prioritySwipePending.set(false)
@@ -1947,6 +2026,7 @@ class ScreenAutomationService : AccessibilityService() {
             }
             val metrics = gestureDisplayMetrics()
             if (!actionState.beginSwiping()) {
+                logSwipeAction(actionId, "rejected", "reason=phase_at_dispatch phase=${actionState.phase}")
                 swipePending.set(false)
                 if (priority) {
                     prioritySwipePending.set(false)
@@ -1961,17 +2041,24 @@ class ScreenAutomationService : AccessibilityService() {
             val gesture = GestureDescription.Builder()
                 .addStroke(GestureDescription.StrokeDescription(path, 0L, spec.durationMs))
                 .build()
+            logSwipeAction(actionId, "dispatching", "durationMs=${spec.durationMs}")
             val accepted = dispatchGesture(
                 gesture,
                 object : GestureResultCallback() {
                     override fun onCompleted(gestureDescription: GestureDescription?) {
                         when (finishGesture(actionToken).status) {
-                            GestureTerminalStatus.NOT_PENDING -> return
+                            GestureTerminalStatus.NOT_PENDING -> {
+                                logSwipeAction(actionId, "terminal", "status=NOT_PENDING")
+                                return
+                            }
                             GestureTerminalStatus.STALE -> {
+                                logSwipeAction(actionId, "terminal", "status=STALE")
                                 clearStaleSwipe(priority)
                                 return
                             }
-                            GestureTerminalStatus.CURRENT -> Unit
+                            GestureTerminalStatus.CURRENT -> {
+                                logSwipeAction(actionId, "terminal", "status=COMPLETED")
+                            }
                         }
                         if (priority) {
                             prioritySwipePending.set(false)
@@ -2001,12 +2088,18 @@ class ScreenAutomationService : AccessibilityService() {
 
                     override fun onCancelled(gestureDescription: GestureDescription?) {
                         when (finishGesture(actionToken).status) {
-                            GestureTerminalStatus.NOT_PENDING -> return
+                            GestureTerminalStatus.NOT_PENDING -> {
+                                logSwipeAction(actionId, "terminal", "status=NOT_PENDING")
+                                return
+                            }
                             GestureTerminalStatus.STALE -> {
+                                logSwipeAction(actionId, "terminal", "status=STALE")
                                 clearStaleSwipe(priority)
                                 return
                             }
-                            GestureTerminalStatus.CURRENT -> Unit
+                            GestureTerminalStatus.CURRENT -> {
+                                logSwipeAction(actionId, "terminal", "status=CANCELLED")
+                            }
                         }
                         swipePending.set(false)
                         if (priority) {
@@ -2019,7 +2112,9 @@ class ScreenAutomationService : AccessibilityService() {
                 },
                 mainHandler,
             )
+            logSwipeAction(actionId, "dispatch", "accepted=$accepted")
             if (!accepted) {
+                logSwipeAction(actionId, "terminal", "status=REJECTED_DISPATCH")
                 swipePending.set(false)
                 if (priority) {
                     prioritySwipePending.set(false)
@@ -2029,6 +2124,7 @@ class ScreenAutomationService : AccessibilityService() {
                 lastResult = "系統拒絕滑動手勢"
             } else {
                 armGestureWatchdog(actionToken, GestureKind.SWIPE, onTimeout = {
+                    logSwipeAction(actionId, "terminal", "status=TIMEOUT")
                     if (actionState.cancelSwipe()) {
                         swipePending.set(false)
                         if (priority) {
@@ -2341,6 +2437,13 @@ class ScreenAutomationService : AccessibilityService() {
         }
         actionState.cancelSwipe()
         Log.i(TAG, "stale swipe callback cleared: priority=$priority")
+    }
+
+    private fun logSwipeAction(actionId: String, stage: String, details: String = "") {
+        Log.i(
+            SWIPE_ACTION_LOG_TAG,
+            "actionId=$actionId stage=$stage" + if (details.isBlank()) "" else " $details",
+        )
     }
 
     private fun recordWouldAct(action: String, description: String, zoneId: String? = null) {
@@ -2702,6 +2805,13 @@ class ScreenAutomationService : AccessibilityService() {
         bottom + offsetY,
     )
 
+    private fun Rect.toClickBounds(): ClickBounds = ClickBounds(
+        left.toFloat(),
+        top.toFloat(),
+        right.toFloat(),
+        bottom.toFloat(),
+    )
+
     private fun containsCjk(value: String): Boolean = value.any { char ->
         char.code in 0x3400..0x9fff || char.code in 0xf900..0xfaff
     }
@@ -2710,12 +2820,6 @@ class ScreenAutomationService : AccessibilityService() {
         val bitmap: Bitmap,
         val offsetX: Int,
         val offsetY: Int,
-    )
-
-    private data class NumberLineEvidence(
-        val elements: List<NumberTextElement>,
-        val hasNumericText: Boolean,
-        val missingNumericBounds: Boolean,
     )
 
     private enum class NumberColorAssessment {
@@ -3001,6 +3105,8 @@ class ScreenAutomationService : AccessibilityService() {
         private const val IMAGE_SAFE_HALF_RATIO = 0.10f
         private const val TAG = "ScreenAutomation"
         private const val NUMBER_LOG_TAG = "CSC_NUMBER_OBSERVATION"
+        private const val NUMBER_ACTION_LOG_TAG = "CSC_NUMBER_ACTION"
+        private const val SWIPE_ACTION_LOG_TAG = "CSC_SWIPE_ACTION"
         private const val WOULD_ACT_LOG_TAG = "CSC_WOULD_ACT"
 
         @Volatile

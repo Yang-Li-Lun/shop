@@ -4,7 +4,7 @@ CSC 是一個 Android 10+ 的本機多區域螢幕辨識／自動點擊工具。
 
 Android 套件識別碼為 `com.example.csc`。
 
-目前交付版本為 **1.16**：修正數字監控的低品質 OCR／ROI 證據分類、混合文字小數重組與過期手勢回呼清理，並加入只觀察診斷模式；保留既有設定與 session／手勢保護。完整架構、設定契約、建置安裝及回退方式見 [1.16 驗證紀錄](docs/verification/CSC-1.16.md)；前版基線見 [1.14 工程交接文件](ENGINEERING_HANDOFF_CSC_1.14.md)。對應原始碼標籤為 `v1.16`。
+目前交付版本為 **1.17**：修正數字監控 OCR line／element／symbol 的 ROI 證據隔離，避免區外雜訊反覆重置缺失倒數；缺失 Handler／UI 共用 absolute deadline，並補上數字決策至手勢終態的可追蹤紀錄。保留既有設定與 session／手勢保護。完整架構、設定契約、建置安裝及回退方式見 [1.17 驗證紀錄](docs/verification/CSC-1.17.md)；前版基線見 [1.16 驗證紀錄](docs/verification/CSC-1.16.md)。對應原始碼標籤為 `v1.17`。
 
 ## 功能
 

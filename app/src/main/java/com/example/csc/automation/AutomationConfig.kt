@@ -165,6 +165,206 @@ internal fun extractSingleDecimalNumber(value: String): Double? =
 internal fun hasPotentialNumberText(value: String): Boolean =
     value.any { it.isDigit() || it == '.' || it == ',' }
 
+internal enum class NumberRoiLocation {
+    INSIDE,
+    OUTSIDE,
+    CROSSING,
+    UNKNOWN,
+}
+
+/** A pure OCR node used to retain text geometry while drilling from line to symbol. */
+internal data class NumberTextNode(
+    val text: String,
+    val bounds: ClickBounds?,
+    val children: List<NumberTextNode> = emptyList(),
+)
+
+internal data class NumberRoiEvidence(
+    val elements: List<NumberTextElement>,
+    val hasNumericText: Boolean,
+    val missingNumericBounds: Boolean,
+    val numericLocations: Set<NumberRoiLocation>,
+)
+
+internal fun classifyNumberRoiLocation(
+    bounds: ClickBounds?,
+    region: RecognitionRegion,
+    width: Int,
+    height: Int,
+): NumberRoiLocation {
+    if (bounds == null || width <= 0 || height <= 0 ||
+        !bounds.left.isFinite() || !bounds.top.isFinite() ||
+        !bounds.right.isFinite() || !bounds.bottom.isFinite() ||
+        bounds.right <= bounds.left || bounds.bottom <= bounds.top
+    ) return NumberRoiLocation.UNKNOWN
+
+    val normalized = region.normalized()
+    val regionLeft = normalized.left * width
+    val regionTop = normalized.top * height
+    val regionRight = normalized.right * width
+    val regionBottom = normalized.bottom * height
+    val overlaps = bounds.left < regionRight && bounds.right > regionLeft &&
+        bounds.top < regionBottom && bounds.bottom > regionTop
+    if (!overlaps) return NumberRoiLocation.OUTSIDE
+    return if (bounds.left >= regionLeft && bounds.right <= regionRight &&
+        bounds.top >= regionTop && bounds.bottom <= regionBottom
+    ) {
+        NumberRoiLocation.INSIDE
+    } else {
+        NumberRoiLocation.CROSSING
+    }
+}
+
+/**
+ * Collects only number evidence that is relevant to the configured ROI. A broad OCR line is
+ * never trusted over its more precise element/symbol children. Reliable outside parents can
+ * safely discard children whose boxes are absent; crossing or unknown numeric evidence remains
+ * conservative so the caller can reject it as Invalid.
+ */
+internal fun collectNumberRoiEvidence(
+    lineText: String,
+    lineBounds: ClickBounds?,
+    elements: List<NumberTextNode>,
+    numberRegion: RecognitionRegion,
+    bitmapWidth: Int,
+    bitmapHeight: Int,
+): NumberRoiEvidence {
+    val locations = linkedSetOf<NumberRoiLocation>()
+    val numberElements = mutableListOf<NumberTextElement>()
+    var hasNumericText = false
+    var missingNumericBounds = false
+
+    val allText = buildString {
+        append(lineText)
+        fun appendNode(node: NumberTextNode) {
+            append(node.text)
+            node.children.forEach(::appendNode)
+        }
+        elements.forEach(::appendNode)
+    }
+    val hasDigitContext = allText.any(Char::isDigit)
+    fun isRelevant(text: String): Boolean =
+        text.any(Char::isDigit) || (hasDigitContext && text.any { it == '.' || it == ',' })
+
+    val lineLocation = classifyNumberRoiLocation(lineBounds, numberRegion, bitmapWidth, bitmapHeight)
+    val lineHasNumericText = isRelevant(lineText)
+    if (lineLocation == NumberRoiLocation.OUTSIDE) {
+        if (lineHasNumericText) locations += NumberRoiLocation.OUTSIDE
+        return NumberRoiEvidence(numberElements, false, false, locations)
+    }
+
+    if (elements.isEmpty()) {
+        if (lineHasNumericText) {
+            hasNumericText = true
+            locations += lineLocation
+            missingNumericBounds = true
+        }
+        return NumberRoiEvidence(numberElements, hasNumericText, missingNumericBounds, locations)
+    }
+
+    var descendantHasNumericText = false
+    elements.forEach { element ->
+        val elementLocation = classifyNumberRoiLocation(
+            element.bounds,
+            numberRegion,
+            bitmapWidth,
+            bitmapHeight,
+        )
+        val elementHasNumericText = isRelevant(element.text)
+        descendantHasNumericText = descendantHasNumericText || elementHasNumericText
+
+        // A reliable outside parent is enough to discard even a child whose box is absent.
+        if (elementLocation == NumberRoiLocation.OUTSIDE) {
+            if (elementHasNumericText) locations += NumberRoiLocation.OUTSIDE
+            return@forEach
+        }
+
+        val children = element.children
+        if (children.isNotEmpty()) {
+            var childHasNumericText = false
+            children.forEach { child ->
+                val childLocation = classifyNumberRoiLocation(
+                    child.bounds,
+                    numberRegion,
+                    bitmapWidth,
+                    bitmapHeight,
+                )
+                val childIsNumeric = isRelevant(child.text)
+                descendantHasNumericText = descendantHasNumericText || childIsNumeric
+                if (childIsNumeric) {
+                    childHasNumericText = true
+                    locations += childLocation
+                    when (childLocation) {
+                        NumberRoiLocation.INSIDE,
+                        NumberRoiLocation.CROSSING,
+                        -> {
+                            hasNumericText = true
+                            child.bounds?.let { numberElements += NumberTextElement(child.text, it) }
+                        }
+                        NumberRoiLocation.UNKNOWN -> {
+                            hasNumericText = true
+                            missingNumericBounds = true
+                        }
+                        NumberRoiLocation.OUTSIDE -> Unit
+                    }
+                } else if (childLocation == NumberRoiLocation.INSIDE ||
+                    childLocation == NumberRoiLocation.CROSSING
+                ) {
+                    // Keep non-numeric separators so a later token rebuild cannot join two
+                    // neighboring numbers across an OCR element boundary.
+                    child.bounds?.let { numberElements += NumberTextElement(child.text, it) }
+                }
+            }
+
+            if (elementHasNumericText && !childHasNumericText) {
+                locations += elementLocation
+                when (elementLocation) {
+                    NumberRoiLocation.INSIDE,
+                    NumberRoiLocation.CROSSING,
+                    -> {
+                        hasNumericText = true
+                        missingNumericBounds = true
+                    }
+                    NumberRoiLocation.UNKNOWN -> {
+                        hasNumericText = true
+                        missingNumericBounds = true
+                    }
+                    NumberRoiLocation.OUTSIDE -> Unit
+                }
+            }
+        } else if (elementHasNumericText) {
+            locations += elementLocation
+            when (elementLocation) {
+                NumberRoiLocation.INSIDE,
+                NumberRoiLocation.CROSSING,
+                -> {
+                    hasNumericText = true
+                    element.bounds?.let { numberElements += NumberTextElement(element.text, it) }
+                }
+                NumberRoiLocation.UNKNOWN -> {
+                    hasNumericText = true
+                    missingNumericBounds = true
+                }
+                NumberRoiLocation.OUTSIDE -> Unit
+            }
+        } else if (elementLocation == NumberRoiLocation.INSIDE ||
+            elementLocation == NumberRoiLocation.CROSSING
+        ) {
+            element.bounds?.let { numberElements += NumberTextElement(element.text, it) }
+        }
+    }
+
+    // If the line reports a number but no child carries that evidence, retain the line-level
+    // uncertainty. If child geometry did identify it as wholly outside, do not reintroduce the
+    // broad line and pollute the monitored ROI.
+    if (lineHasNumericText && !descendantHasNumericText) {
+        hasNumericText = true
+        locations += lineLocation
+        missingNumericBounds = true
+    }
+    return NumberRoiEvidence(numberElements, hasNumericText, missingNumericBounds, locations)
+}
+
 internal fun formatRecognizedNumbers(values: List<Double>, maximumItems: Int = 6): String =
     values.distinct().take(maximumItems).joinToString("、") { value ->
         BigDecimal.valueOf(value).stripTrailingZeros().toPlainString()

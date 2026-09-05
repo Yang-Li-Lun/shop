@@ -31,6 +31,13 @@ class NumberMonitorTracker {
         data class Invalid(val reason: InvalidReason) : Observation()
     }
 
+    data class AbsenceSnapshot(
+        val startedAtMs: Long?,
+        val deadlineMs: Long?,
+        val observations: Int,
+        val confirmationDue: Boolean,
+    )
+
     private enum class RiskDirection { LOW, HIGH }
 
     private data class LastKnownGood(
@@ -125,6 +132,14 @@ class NumberMonitorTracker {
         swipeRequested = false
         return Action.REQUEST_FRESH_OBSERVATION
     }
+
+    @Synchronized
+    fun absenceSnapshot(): AbsenceSnapshot = AbsenceSnapshot(
+        startedAtMs = missingStartedAtMs,
+        deadlineMs = missingStartedAtMs?.let { it + lastAbsenceTimeoutMs },
+        observations = missingObservations,
+        confirmationDue = absenceConfirmationDue,
+    )
 
     /** Clears all evidence, including the last-known-good value, after a page/action boundary. */
     @Synchronized

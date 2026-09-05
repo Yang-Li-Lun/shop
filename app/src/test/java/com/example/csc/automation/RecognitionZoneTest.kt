@@ -410,6 +410,196 @@ class RecognitionZoneTest {
     }
 
     @Test
+    fun outsideLineNumberEvidenceDoesNotPolluteEmptyNumberRoi() {
+        val evidence = collectNumberRoiEvidence(
+            lineText = ".",
+            lineBounds = ClickBounds(600f, 360f, 620f, 380f),
+            elements = emptyList(),
+            numberRegion = RecognitionRegion(0.68f, 0.22f, 0.795f, 0.35f),
+            bitmapWidth = 720,
+            bitmapHeight = 1_560,
+        )
+
+        assertFalse(evidence.hasNumericText)
+        assertFalse(evidence.missingNumericBounds)
+        assertEquals(NumberMonitorTracker.Observation.Missing,
+            classifyNumberObservation(emptyList(), evidence.hasNumericText, emptySet()))
+    }
+
+    @Test
+    fun wideLineDrillsIntoOutsideElementInsteadOfUsingLineText() {
+        val evidence = collectNumberRoiEvidence(
+            lineText = "0.2",
+            lineBounds = ClickBounds(400f, 340f, 700f, 560f),
+            elements = listOf(
+                NumberTextNode("0.2", ClickBounds(600f, 360f, 630f, 390f)),
+            ),
+            numberRegion = RecognitionRegion(0.68f, 0.22f, 0.795f, 0.35f),
+            bitmapWidth = 720,
+            bitmapHeight = 1_560,
+        )
+
+        assertFalse(evidence.hasNumericText)
+        assertFalse(evidence.missingNumericBounds)
+        assertEquals(setOf(NumberRoiLocation.OUTSIDE), evidence.numericLocations)
+        assertEquals(NumberMonitorTracker.Observation.Missing,
+            classifyNumberObservation(emptyList(), evidence.hasNumericText, emptySet()))
+    }
+
+    @Test
+    fun outsideParentMakesMissingChildBoundsSafeToIgnore() {
+        val evidence = collectNumberRoiEvidence(
+            lineText = "0.2",
+            lineBounds = ClickBounds(400f, 340f, 700f, 560f),
+            elements = listOf(
+                NumberTextNode("0.2", ClickBounds(600f, 360f, 630f, 390f),
+                    children = listOf(NumberTextNode("0.2", bounds = null))),
+            ),
+            numberRegion = RecognitionRegion(0.68f, 0.22f, 0.795f, 0.35f),
+            bitmapWidth = 720,
+            bitmapHeight = 1_560,
+        )
+
+        assertFalse(evidence.hasNumericText)
+        assertFalse(evidence.missingNumericBounds)
+        assertEquals(setOf(NumberRoiLocation.OUTSIDE), evidence.numericLocations)
+    }
+
+    @Test
+    fun crossingSymbolIsRetainedAsConservativeInvalidEvidence() {
+        val evidence = collectNumberRoiEvidence(
+            lineText = "0.2",
+            lineBounds = ClickBounds(470f, 340f, 590f, 560f),
+            elements = listOf(
+                NumberTextNode("0.2", ClickBounds(470f, 360f, 590f, 390f),
+                    children = listOf(NumberTextNode("0.2", ClickBounds(560f, 360f, 590f, 390f)))),
+            ),
+            numberRegion = RecognitionRegion(0.68f, 0.22f, 0.795f, 0.35f),
+            bitmapWidth = 720,
+            bitmapHeight = 1_560,
+        )
+
+        assertTrue(evidence.hasNumericText)
+        assertTrue(NumberRoiLocation.CROSSING in evidence.numericLocations)
+        assertEquals(NumberMonitorTracker.Observation.Invalid(NumberMonitorTracker.InvalidReason.OUTSIDE_ROI),
+            classifyNumberObservation(
+                values = emptyList(),
+                hasNumericText = evidence.hasNumericText,
+                invalidReasons = setOf(NumberMonitorTracker.InvalidReason.OUTSIDE_ROI),
+            ))
+    }
+
+    @Test
+    fun inRoiSymbolsReachTokenRebuildThroughTheEvidenceHelper() {
+        val evidence = collectNumberRoiEvidence(
+            lineText = "0.2",
+            lineBounds = ClickBounds(490f, 350f, 570f, 390f),
+            elements = listOf(
+                NumberTextNode("0.2", ClickBounds(500f, 360f, 540f, 385f),
+                    children = listOf(
+                        NumberTextNode("0", ClickBounds(500f, 360f, 510f, 385f)),
+                        NumberTextNode(".", ClickBounds(511f, 375f, 514f, 385f)),
+                        NumberTextNode("2", ClickBounds(515f, 360f, 525f, 385f)),
+                    )),
+            ),
+            numberRegion = RecognitionRegion(0.68f, 0.22f, 0.795f, 0.35f),
+            bitmapWidth = 720,
+            bitmapHeight = 1_560,
+        )
+
+        assertEquals(listOf("0.2"), rebuildNumberTokens(evidence.elements).map { it.text })
+        assertEquals(setOf(NumberRoiLocation.INSIDE), evidence.numericLocations)
+    }
+
+    @Test
+    fun unknownSymbolBoundsRemainInvalidInsteadOfBecomingMissing() {
+        val evidence = collectNumberRoiEvidence(
+            lineText = "0.2",
+            lineBounds = ClickBounds(490f, 350f, 560f, 390f),
+            elements = listOf(
+                NumberTextNode("0.2", ClickBounds(500f, 360f, 540f, 385f),
+                    children = listOf(NumberTextNode("0.2", bounds = null))),
+            ),
+            numberRegion = RecognitionRegion(0.68f, 0.22f, 0.795f, 0.35f),
+            bitmapWidth = 720,
+            bitmapHeight = 1_560,
+        )
+
+        assertTrue(evidence.hasNumericText)
+        assertTrue(evidence.missingNumericBounds)
+        assertTrue(NumberRoiLocation.UNKNOWN in evidence.numericLocations)
+        assertEquals(NumberMonitorTracker.Observation.Invalid(NumberMonitorTracker.InvalidReason.MISSING_BOUNDS),
+            classifyNumberObservation(emptyList(), evidence.hasNumericText,
+                setOf(NumberMonitorTracker.InvalidReason.MISSING_BOUNDS)))
+    }
+
+    @Test
+    fun isolatedInsidePunctuationIsNotAssumedToBeNumberFailure() {
+        val evidence = collectNumberRoiEvidence(
+            lineText = ".",
+            lineBounds = ClickBounds(500f, 360f, 520f, 380f),
+            elements = listOf(NumberTextNode(".", ClickBounds(500f, 360f, 520f, 380f))),
+            numberRegion = RecognitionRegion(0.68f, 0.22f, 0.795f, 0.35f),
+            bitmapWidth = 720,
+            bitmapHeight = 1_560,
+        )
+
+        assertFalse(evidence.hasNumericText)
+        assertEquals(NumberMonitorTracker.Observation.Missing,
+            classifyNumberObservation(emptyList(), evidence.hasNumericText, emptySet()))
+    }
+
+    @Test
+    fun insideTruncatedDecimalRetainsNumericContextAsParseInvalid() {
+        val evidence = collectNumberRoiEvidence(
+            lineText = "0.",
+            lineBounds = ClickBounds(500f, 360f, 530f, 380f),
+            elements = listOf(NumberTextNode("0.", ClickBounds(500f, 360f, 530f, 380f))),
+            numberRegion = RecognitionRegion(0.68f, 0.22f, 0.795f, 0.35f),
+            bitmapWidth = 720,
+            bitmapHeight = 1_560,
+        )
+
+        assertTrue(evidence.hasNumericText)
+        assertEquals(NumberMonitorTracker.Observation.Invalid(NumberMonitorTracker.InvalidReason.PARSE_AMBIGUOUS),
+            classifyNumberObservation(emptyList(), evidence.hasNumericText,
+                setOf(NumberMonitorTracker.InvalidReason.PARSE_AMBIGUOUS)))
+    }
+
+    @Test
+    fun thirtySecondOutsideRoiNoiseStillReachesOneAbsenceDecision() {
+        val region = RecognitionRegion(0.68f, 0.22f, 0.795f, 0.35f)
+        val tracker = NumberMonitorTracker()
+        var swipeCount = 0
+
+        repeat(61) { index ->
+            val evidence = collectNumberRoiEvidence(
+                lineText = "0.2",
+                lineBounds = ClickBounds(600f, 360f, 630f, 390f),
+                elements = emptyList(),
+                numberRegion = region,
+                bitmapWidth = 720,
+                bitmapHeight = 1_560,
+            )
+            assertEquals(NumberMonitorTracker.Observation.Missing,
+                classifyNumberObservation(emptyList(), evidence.hasNumericText, emptySet()))
+            if (tracker.observe(
+                    nowMs = index * 500L,
+                    observation = NumberMonitorTracker.Observation.Missing,
+                    roiFingerprint = 99L,
+                    threshold = 0.15f,
+                    upperLimit = 3f,
+                    absenceTimeoutMs = 6_000L,
+                ) == NumberMonitorTracker.Action.SWIPE_ABSENT
+            ) {
+                swipeCount++
+            }
+        }
+
+        assertEquals(1, swipeCount)
+    }
+
+    @Test
     fun nonNumericElementSeparatesNearbyNumbersLikeVersion112() {
         val tokens = rebuildNumberTokens(listOf(
             NumberTextElement("0.2", ClickBounds(10f, 10f, 30f, 24f)),
