@@ -38,6 +38,7 @@ data class AutomationSettings(
     val circleXThreshold: Float = 0.88f,
     val backArrowThreshold: Float = 0.72f,
     val targetPackage: String = "",
+    val observationOnly: Boolean = false,
 ) {
     val targetCount: Int get() = zones.sumOf { it.targets.size }
 
@@ -158,6 +159,12 @@ internal fun extractDecimalNumbers(value: String): List<Double> =
         .mapNotNull { match -> match.value.replace(',', '.').toDoubleOrNull() }
         .toList()
 
+internal fun extractSingleDecimalNumber(value: String): Double? =
+    extractDecimalNumbers(value).singleOrNull()?.takeIf(Double::isFinite)
+
+internal fun hasPotentialNumberText(value: String): Boolean =
+    value.any { it.isDigit() || it == '.' || it == ',' }
+
 internal fun formatRecognizedNumbers(values: List<Double>, maximumItems: Int = 6): String =
     values.distinct().take(maximumItems).joinToString("、") { value ->
         BigDecimal.valueOf(value).stripTrailingZeros().toPlainString()
@@ -175,6 +182,24 @@ internal fun decideNumberMonitorAction(
     values.any { it + NUMBER_BOUNDARY_EPSILON >= threshold } -> NumberMonitorDecision.STAY
     values.all { it < threshold - NUMBER_BOUNDARY_EPSILON } -> NumberMonitorDecision.SWIPE_UP
     else -> NumberMonitorDecision.STAY
+}
+
+internal fun classifyNumberObservation(
+    values: List<Double>,
+    hasNumericText: Boolean,
+    invalidReasons: Set<NumberMonitorTracker.InvalidReason>,
+): NumberMonitorTracker.Observation {
+    values.maxOrNull()?.takeIf(Double::isFinite)?.let { value ->
+        return NumberMonitorTracker.Observation.Value(value)
+    }
+    val reason = invalidReasons.minByOrNull { it.ordinal }
+    return if (hasNumericText && reason != null) {
+        NumberMonitorTracker.Observation.Invalid(reason)
+    } else {
+        // A successful OCR frame with no numeric text, or only numbers wholly outside the
+        // configured region, is usable evidence that the monitored region has no number.
+        NumberMonitorTracker.Observation.Missing
+    }
 }
 
 internal data class NumberTextCandidate(
@@ -205,7 +230,7 @@ internal fun rebuildNumberTokens(elements: List<NumberTextElement>): List<Number
     var previous: NumberTextElement? = null
 
     fun flush() {
-        if (currentText.isNotBlank() && currentBounds != null) {
+        if (currentBounds != null && extractSingleDecimalNumber(currentText) != null) {
             tokens += NumberTextToken(currentText, currentBounds!!)
         }
         currentText = ""
@@ -231,21 +256,51 @@ internal fun rebuildNumberTokens(elements: List<NumberTextElement>): List<Number
 private fun isNumericElement(text: String): Boolean {
     val normalized = text.filterNot(Char::isWhitespace)
     return normalized.isNotEmpty() &&
-        (normalized.any(Char::isDigit) || normalized == "." || normalized == ",") &&
+        (normalized.any(Char::isDigit) || normalized == "." || normalized == "," ||
+            normalized == "+" || normalized == "-") &&
         normalized.all { it.isDigit() || it == '.' || it == ',' || it == '+' || it == '-' }
 }
 
 private fun numberElementsCanJoin(first: NumberTextElement, second: NumberTextElement): Boolean {
+    val firstText = first.text.filterNot(Char::isWhitespace)
+    val secondText = second.text.filterNot(Char::isWhitespace)
+    val combinedText = firstText + secondText
+    if (!isPartialNumberSyntax(combinedText)) return false
+    // Once a decimal already has fractional digits, a neighbouring digit is not safe to append:
+    // 0.2 + 3 may be 0.23 or two values. Keep it separate and let candidate selection decide.
+    if (firstText.any { it == '.' || it == ',' } &&
+        firstText.any(Char::isDigit) && secondText.any(Char::isDigit)
+    ) return false
+
     val firstHeight = first.bounds.bottom - first.bounds.top
     val secondHeight = second.bounds.bottom - second.bounds.top
     val minimumHeight = minOf(firstHeight, secondHeight)
     val maximumHeight = maxOf(firstHeight, secondHeight)
-    if (minimumHeight <= 0f || maximumHeight / minimumHeight > 1.8f) return false
+    if (minimumHeight <= 0f || maximumHeight <= 0f) return false
+    val decimalPointInvolved = firstText == "." || firstText == "," ||
+        secondText == "." || secondText == ","
+    if (!decimalPointInvolved && maximumHeight / minimumHeight > 1.35f) return false
     val baselineDelta = abs(first.bounds.bottom - second.bounds.bottom)
-    if (baselineDelta > maxOf(2f, minimumHeight * 0.5f)) return false
+    val baselineLimit = if (decimalPointInvolved) {
+        maxOf(3f, maximumHeight * 0.45f)
+    } else {
+        maxOf(2f, minimumHeight * 0.5f)
+    }
+    if (baselineDelta > baselineLimit) return false
     val horizontalGap = second.bounds.left - first.bounds.right
-    return horizontalGap >= -minimumHeight * 0.5f &&
-        horizontalGap <= maxOf(4f, maximumHeight * 1.5f)
+    return horizontalGap >= -maximumHeight * 0.5f &&
+        horizontalGap <= maxOf(4f, maximumHeight * 0.75f)
+}
+
+private fun isPartialNumberSyntax(value: String): Boolean {
+    if (value.isBlank()) return false
+    val normalized = value.filterNot(Char::isWhitespace)
+    if (normalized.count { it == '+' || it == '-' } > 1) return false
+    if (normalized.drop(1).any { it == '+' || it == '-' }) return false
+    if (normalized.count { it == '.' || it == ',' } > 1) return false
+    if (!normalized.drop(1).all { it.isDigit() || it == '.' || it == ',' }) return false
+    return normalized.any(Char::isDigit) || normalized == "." || normalized == "," ||
+        normalized == "+" || normalized == "-"
 }
 
 private fun ClickBounds.union(other: ClickBounds): ClickBounds = ClickBounds(
@@ -257,8 +312,7 @@ private fun ClickBounds.union(other: ClickBounds): ClickBounds = ClickBounds(
 
 internal fun selectNumberMonitorValues(candidates: List<NumberTextCandidate>): List<Double> =
     candidates.mapNotNull { candidate ->
-        extractDecimalNumbers(candidate.text).firstOrNull()
-            ?.takeIf(Double::isFinite)
+        extractSingleDecimalNumber(candidate.text)
             ?.let { value -> candidate to value }
     }
         .minWithOrNull(compareBy<Pair<NumberTextCandidate, Double>> { it.first.centerDistanceSquared }
@@ -491,6 +545,7 @@ object AutomationConfig {
     private const val KEY_REGION_RIGHT = "region_right"
     private const val KEY_REGION_BOTTOM = "region_bottom"
     private const val KEY_SHOW_CLICK_MARKER = "show_click_marker"
+    private const val KEY_OBSERVATION_ONLY = "observation_only"
     private const val KEY_ZONES = "recognition_zones_v1"
 
     private val cacheLock = Any()
@@ -548,6 +603,7 @@ object AutomationConfig {
             ),
             numberTriggerDelayMs = preferences.getLong(KEY_NUMBER_TRIGGER_DELAY, 0L)
                 .coerceIn(0L, 30_000L),
+            observationOnly = preferences.getBoolean(KEY_OBSERVATION_ONLY, false),
         )
         synchronized(cacheLock) {
             cachedPreferences = preferences
@@ -614,6 +670,7 @@ object AutomationConfig {
         numberAbsenceTimeoutMs: Long,
         numberTriggerZoneId: String?,
         numberTriggerDelayMs: Long,
+        observationOnly: Boolean = false,
     ) {
         val safeZones = zones.map(RecognitionZone::normalized).take(MAX_ZONES)
         context.getSharedPreferences(PREFS, Context.MODE_PRIVATE).edit()
@@ -638,6 +695,7 @@ object AutomationConfig {
             .putLong(KEY_NUMBER_ABSENCE_TIMEOUT, numberAbsenceTimeoutMs.coerceIn(500L, 30_000L))
             .putString(KEY_NUMBER_TRIGGER_ZONE, encodeNumberTriggerZoneId(numberTriggerZoneId))
             .putLong(KEY_NUMBER_TRIGGER_DELAY, numberTriggerDelayMs.coerceIn(0L, 30_000L))
+            .putBoolean(KEY_OBSERVATION_ONLY, observationOnly)
             .apply()
         invalidate(context)
     }

@@ -145,18 +145,51 @@ class NumberMonitorTrackerTest {
         val tracker = NumberMonitorTracker()
         observe(tracker, 0L, NumberMonitorTracker.Observation.Value(0.20), 7L)
         assertEquals(NumberMonitorAction.REQUEST_FRESH_OBSERVATION,
-            observe(tracker, 100L, NumberMonitorTracker.Observation.Invalid, 7L))
+            observe(tracker, 100L, NumberMonitorTracker.Observation.Invalid(
+                NumberMonitorTracker.InvalidReason.OCR_ERROR,
+            ), 7L))
         assertEquals(NumberMonitorAction.STAY, tracker.onAbsenceDeadline(2_000L))
     }
 
     @Test
-    fun invalidOnChangedRoiUsesVersion112AbsenceConfirmation() {
+    fun invalidOnChangedRoiNeverStartsAbsenceConfirmation() {
         val tracker = NumberMonitorTracker()
         observe(tracker, 0L, NumberMonitorTracker.Observation.Value(0.20), 7L)
+        assertEquals(NumberMonitorAction.REQUEST_FRESH_OBSERVATION,
+            observe(tracker, 100L, NumberMonitorTracker.Observation.Invalid(
+                NumberMonitorTracker.InvalidReason.PARSE_AMBIGUOUS,
+            ), 8L))
+        assertEquals(NumberMonitorAction.STAY, tracker.onAbsenceDeadline(1_100L))
+    }
+
+    @Test
+    fun missingThenInvalidThenDeadlineCannotSwipe() {
+        val tracker = NumberMonitorTracker()
         assertEquals(NumberMonitorAction.START_OR_KEEP_ABSENCE,
-            observe(tracker, 100L, NumberMonitorTracker.Observation.Invalid, 8L))
-        assertEquals(NumberMonitorAction.REQUEST_FRESH_OBSERVATION, tracker.onAbsenceDeadline(1_100L))
-        assertEquals(NumberMonitorAction.SWIPE_ABSENT,
-            observe(tracker, 1_101L, NumberMonitorTracker.Observation.Invalid, 8L))
+            observe(tracker, 0L, NumberMonitorTracker.Observation.Missing, 1L))
+        assertEquals(NumberMonitorAction.REQUEST_FRESH_OBSERVATION,
+            observe(tracker, 400L, NumberMonitorTracker.Observation.Invalid(
+                NumberMonitorTracker.InvalidReason.COLOR_UNCERTAIN,
+            ), 2L))
+        assertEquals(NumberMonitorAction.STAY, tracker.onAbsenceDeadline(1_100L))
+    }
+
+    @Test
+    fun invalidThenNormalValueRecoversNormally() {
+        val tracker = NumberMonitorTracker()
+        assertEquals(NumberMonitorAction.REQUEST_FRESH_OBSERVATION,
+            observe(tracker, 0L, NumberMonitorTracker.Observation.Invalid(
+                NumberMonitorTracker.InvalidReason.MISSING_BOUNDS,
+            ), 1L))
+        assertEquals(NumberMonitorAction.STAY,
+            observe(tracker, 250L, NumberMonitorTracker.Observation.Value(0.33), 2L))
+    }
+
+    @Test
+    fun nonFiniteValueIsInvalidNotMissing() {
+        val tracker = NumberMonitorTracker()
+        assertEquals(NumberMonitorAction.REQUEST_FRESH_OBSERVATION,
+            observe(tracker, 0L, NumberMonitorTracker.Observation.Value(Double.NaN), 1L))
+        assertEquals(NumberMonitorAction.STAY, tracker.onAbsenceDeadline(1_000L))
     }
 }

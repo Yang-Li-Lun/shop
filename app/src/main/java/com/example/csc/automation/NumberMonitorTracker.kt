@@ -17,10 +17,18 @@ class NumberMonitorTracker {
         SWIPE_ABSENT,
     }
 
+    enum class InvalidReason(val displayName: String) {
+        OCR_ERROR("OCR_ERROR"),
+        PARSE_AMBIGUOUS("PARSE_AMBIGUOUS"),
+        OUTSIDE_ROI("OUTSIDE_ROI"),
+        MISSING_BOUNDS("MISSING_BOUNDS"),
+        COLOR_UNCERTAIN("COLOR_UNCERTAIN"),
+    }
+
     sealed class Observation {
         data class Value(val value: Double) : Observation()
         object Missing : Observation()
-        object Invalid : Observation()
+        data class Invalid(val reason: InvalidReason) : Observation()
     }
 
     private enum class RiskDirection { LOW, HIGH }
@@ -60,6 +68,21 @@ class NumberMonitorTracker {
         // pending general swipe decision; the caller will reset/rebase after that priority run.
         if (prioritySwipePending) return Action.STAY
 
+        when (observation) {
+            is Observation.Invalid -> {
+                // An unreliable frame is not evidence that the number disappeared. Clear any
+                // absence/risk sequence, keep the last known good value for display, and wait
+                // for a new observation before making another decision.
+                clearRiskAndAbsence()
+                return Action.REQUEST_FRESH_OBSERVATION
+            }
+            is Observation.Value -> if (!observation.value.isFinite()) {
+                clearRiskAndAbsence()
+                return Action.REQUEST_FRESH_OBSERVATION
+            }
+            Observation.Missing -> Unit
+        }
+
         val value = (observation as? Observation.Value)?.value
         if (value != null && value.isFinite() &&
             value + NUMBER_BOUNDARY_EPSILON >= threshold &&
@@ -77,10 +100,14 @@ class NumberMonitorTracker {
             return Action.REQUEST_FRESH_OBSERVATION
         }
 
-        return when {
-            value == null || !value.isFinite() -> observeMissing(nowMs, absenceTimeoutMs)
-            value > upperLimit + NUMBER_BOUNDARY_EPSILON -> observeRisk(nowMs, value, RiskDirection.HIGH)
-            else -> observeRisk(nowMs, value, RiskDirection.LOW)
+        return when (observation) {
+            Observation.Missing -> observeMissing(nowMs, absenceTimeoutMs)
+            is Observation.Value -> if (observation.value > upperLimit + NUMBER_BOUNDARY_EPSILON) {
+                observeRisk(nowMs, observation.value, RiskDirection.HIGH)
+            } else {
+                observeRisk(nowMs, observation.value, RiskDirection.LOW)
+            }
+            is Observation.Invalid -> error("Invalid observations return above")
         }
     }
 

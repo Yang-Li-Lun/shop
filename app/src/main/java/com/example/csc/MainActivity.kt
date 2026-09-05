@@ -77,6 +77,7 @@ class MainActivity : Activity() {
     private lateinit var numberMonitorRightInput: EditText
     private lateinit var numberMonitorBottomInput: EditText
     private lateinit var showClickMarkerSwitch: Switch
+    private lateinit var observationOnlySwitch: Switch
     private lateinit var automationSwitch: Switch
     private lateinit var automationStateText: TextView
     private lateinit var targetPackageInput: EditText
@@ -568,6 +569,21 @@ class MainActivity : Activity() {
         }
         markerRow.addView(showClickMarkerSwitch)
         tuningCard.addView(markerRow, matchWidth())
+        tuningCard.addView(space(18))
+        val observationOnlyRow = LinearLayout(this).apply {
+            orientation = LinearLayout.HORIZONTAL
+            gravity = Gravity.CENTER_VERTICAL
+        }
+        observationOnlyRow.addView(LinearLayout(this).apply {
+            orientation = LinearLayout.VERTICAL
+            addView(text("只觀察診斷", 15f, ON_SURFACE, Typeface.BOLD))
+            addView(text("保留擷取與辨識，只記錄 would-act，不送出點擊或上滑。", 13f, MUTED))
+        }, LinearLayout.LayoutParams(0, ViewGroup.LayoutParams.WRAP_CONTENT, 1f))
+        observationOnlySwitch = Switch(this).apply {
+            setOnCheckedChangeListener { _, _ -> saveSettings() }
+        }
+        observationOnlyRow.addView(observationOnlySwitch)
+        tuningCard.addView(observationOnlyRow, matchWidth())
         tuningSection.addView(tuningCard)
         tuningSection.addView(space(2))
 
@@ -599,6 +615,7 @@ class MainActivity : Activity() {
         numberTriggerWaitSecondsInput.setText(secondsInputText(settings.numberTriggerDelayMs))
         numberMonitorWaitSecondsInput.setText(secondsInputText(settings.numberAbsenceTimeoutMs))
         showClickMarkerSwitch.isChecked = settings.showClickMarker
+        observationOnlySwitch.isChecked = settings.observationOnly
         automationSwitch.isChecked = settings.enabled
         thresholdLabel.text = "圖片相似度：${thresholdSeek.progress}%"
         circleXThresholdLabel.text = "圓圈＋X 命中門檻：${circleXThresholdSeek.progress}%"
@@ -926,6 +943,7 @@ class MainActivity : Activity() {
                 ?.toLong()
                 ?.coerceIn(0L, 30_000L)
                 ?: 0L,
+            observationOnly = observationOnlySwitch.isChecked,
         )
         ScreenAutomationService.requestImmediateRefresh()
     }

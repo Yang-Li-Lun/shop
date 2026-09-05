@@ -276,6 +276,10 @@ class RecognitionZoneTest {
         assertEquals(listOf(0.15, 0.2, 3.0), extractDecimalNumbers("門檻 0.15、目前 0,20 / 3"))
         assertEquals(listOf(0.2), extractDecimalNumbers("0 . 2"))
         assertEquals(listOf(0.2), extractDecimalNumbers("0 , 2"))
+        assertEquals(0.2, extractSingleDecimalNumber("0 . 2"))
+        assertEquals(listOf(-0.02, 3.0), extractDecimalNumbers("-0.02 +3.0"))
+        assertEquals(null, extractSingleDecimalNumber("O"))
+        assertEquals(null, extractSingleDecimalNumber("S"))
         assertEquals("0.15、0.2、3", formatRecognizedNumbers(listOf(0.15, 0.2, 3.0)))
     }
 
@@ -285,7 +289,7 @@ class RecognitionZoneTest {
             listOf(
                 NumberTextCandidate("領取", centerDistanceSquared = 0.001, area = 100L),
                 NumberTextCandidate("價格 99", centerDistanceSquared = 0.08, area = 300L),
-                NumberTextCandidate("0 . 2 其他 8", centerDistanceSquared = 0.01, area = 500L),
+                NumberTextCandidate("0 . 2", centerDistanceSquared = 0.01, area = 500L),
                 NumberTextCandidate("0.3", centerDistanceSquared = 0.01, area = 900L),
             ),
         )
@@ -310,6 +314,31 @@ class RecognitionZoneTest {
     }
 
     @Test
+    fun shortDecimalPointCanJoinDigitsUsingBaselineInsteadOfHeight() {
+        val tokens = rebuildNumberTokens(
+            listOf(
+                NumberTextElement("0", ClickBounds(10f, 10f, 20f, 30f)),
+                NumberTextElement(".", ClickBounds(21f, 26f, 24f, 30f)),
+                NumberTextElement("2", ClickBounds(25f, 10f, 35f, 30f)),
+            ),
+        )
+
+        assertEquals(listOf("0.2"), tokens.map { it.text })
+    }
+
+    @Test
+    fun completedDecimalAndNeighbouringNumberStaySeparate() {
+        val tokens = rebuildNumberTokens(
+            listOf(
+                NumberTextElement("0.2", ClickBounds(10f, 10f, 30f, 30f)),
+                NumberTextElement("3", ClickBounds(40f, 10f, 50f, 30f)),
+            ),
+        )
+
+        assertEquals(listOf("0.2", "3"), tokens.map { it.text })
+    }
+
+    @Test
     fun distantOrMisalignedNumberElementsAreNotMerged() {
         val tokens = rebuildNumberTokens(
             listOf(
@@ -322,7 +351,7 @@ class RecognitionZoneTest {
     }
 
     @Test
-    fun mixedOcrElementsAreRejectedLikeVersion112() {
+    fun mixedElementWithoutSymbolBoundsIsRejectedAsAmbiguous() {
         val tokens = rebuildNumberTokens(
             listOf(
                 NumberTextElement("S0.2", ClickBounds(10f, 10f, 42f, 24f)),
@@ -332,6 +361,52 @@ class RecognitionZoneTest {
         )
 
         assertTrue(tokens.isEmpty())
+    }
+
+    @Test
+    fun mixedSymbolBoxesKeepOnlyTheExactNumericSubstring() {
+        val tokens = rebuildNumberTokens(
+            listOf(
+                NumberTextElement("S", ClickBounds(10f, 10f, 18f, 24f)),
+                NumberTextElement("0", ClickBounds(20f, 10f, 28f, 24f)),
+                NumberTextElement(".", ClickBounds(29f, 20f, 32f, 24f)),
+                NumberTextElement("2", ClickBounds(33f, 10f, 41f, 24f)),
+            ),
+        )
+
+        assertEquals(listOf("0.2"), tokens.map { it.text })
+        assertEquals(20f, tokens.single().bounds.left)
+    }
+
+    @Test
+    fun candidateContainingTwoNumbersIsNotSilentlyTruncated() {
+        assertTrue(
+            selectNumberMonitorValues(
+                listOf(NumberTextCandidate("0.2 3", centerDistanceSquared = 0.0, area = 100L)),
+            ).isEmpty(),
+        )
+    }
+
+    @Test
+    fun numberObservationClassifiesRejectedNumericEvidenceAsInvalid() {
+        val observation = classifyNumberObservation(
+            values = emptyList(),
+            hasNumericText = true,
+            invalidReasons = setOf(NumberMonitorTracker.InvalidReason.COLOR_UNCERTAIN),
+        )
+
+        assertEquals(
+            NumberMonitorTracker.Observation.Invalid(NumberMonitorTracker.InvalidReason.COLOR_UNCERTAIN),
+            observation,
+        )
+    }
+
+    @Test
+    fun numberObservationTreatsSuccessfulNoNumberFrameAsMissing() {
+        assertEquals(
+            NumberMonitorTracker.Observation.Missing,
+            classifyNumberObservation(emptyList(), hasNumericText = false, invalidReasons = emptySet()),
+        )
     }
 
     @Test
