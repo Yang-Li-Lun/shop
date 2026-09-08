@@ -16,6 +16,31 @@ enum class AutomationPhase {
 class ActionStateMachine {
     private val phaseRef = AtomicReference(AutomationPhase.IDLE)
 
+    private var pageStartedAt: Long? = null
+    private var qualifyingNumberAt: Long? = null
+
+    @Synchronized fun resetRewardPage() {
+        pageStartedAt = null
+        qualifyingNumberAt = null
+    }
+
+    @Synchronized fun needsInitialPageSwipe(): Boolean = pageStartedAt == null
+
+    @Synchronized fun rewardPageOpened(nowMs: Long) {
+        pageStartedAt = nowMs
+        qualifyingNumberAt = null
+    }
+
+    @Synchronized fun recordRewardNumber(nowMs: Long, qualifies: Boolean) {
+        qualifyingNumberAt = if (qualifies) nowMs else null
+    }
+
+    @Synchronized fun canClaimReward(nowMs: Long): Boolean {
+        val start = pageStartedAt ?: return false
+        val numberAt = qualifyingNumberAt ?: return false
+        return nowMs - start >= 360_000L && nowMs - numberAt in 0L..3_000L
+    }
+
     val phase: AutomationPhase get() = phaseRef.get()
 
     fun tryStartRecognition(): Boolean =

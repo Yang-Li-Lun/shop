@@ -159,8 +159,13 @@ internal fun extractDecimalNumbers(value: String): List<Double> =
         .mapNotNull { match -> match.value.replace(',', '.').toDoubleOrNull() }
         .toList()
 
-internal fun extractSingleDecimalNumber(value: String): Double? =
-    extractDecimalNumbers(value).singleOrNull()?.takeIf(Double::isFinite)
+internal fun extractSingleDecimalNumber(value: String): Double? {
+    val normalized = java.text.Normalizer.normalize(value, java.text.Normalizer.Form.NFKC)
+        .replace(Regex("(?<=\\d)\\s*([.,])\\s*(?=\\d)"), "$1")
+    // A trailing point or a lost point in 02 must never silently become an integer.
+    if (Regex("\\d[.,](?!\\d)|(?<![\\d.,])0\\d").containsMatchIn(normalized)) return null
+    return extractDecimalNumbers(normalized).singleOrNull()?.takeIf(Double::isFinite)
+}
 
 internal fun hasPotentialNumberText(value: String): Boolean =
     value.any { it.isDigit() || it == '.' || it == ',' }
@@ -430,7 +435,7 @@ internal fun rebuildNumberTokens(elements: List<NumberTextElement>): List<Number
     var previous: NumberTextElement? = null
 
     fun flush() {
-        if (currentBounds != null && extractSingleDecimalNumber(currentText) != null) {
+        if (currentBounds != null && currentText.any(Char::isDigit)) {
             tokens += NumberTextToken(currentText, currentBounds!!)
         }
         currentText = ""
@@ -469,7 +474,7 @@ private fun numberElementsCanJoin(first: NumberTextElement, second: NumberTextEl
     // Once a decimal already has fractional digits, a neighbouring digit is not safe to append:
     // 0.2 + 3 may be 0.23 or two values. Keep it separate and let candidate selection decide.
     if (firstText.any { it == '.' || it == ',' } &&
-        firstText.any(Char::isDigit) && secondText.any(Char::isDigit)
+        firstText.lastOrNull()?.isDigit() == true && secondText.any(Char::isDigit)
     ) return false
 
     val firstHeight = first.bounds.bottom - first.bounds.top
@@ -1050,4 +1055,11 @@ object AutomationConfig {
         "image-1787674110907-2",
         "image-1787760722741-1",
     )
+}
+
+/** A countdown or already-claimed label is not an available claim action. */
+internal fun isReadyClaimText(text: String, target: String): Boolean {
+    val value = java.text.Normalizer.normalize(text, java.text.Normalizer.Form.NFKC).filterNot(Char::isWhitespace)
+    return value.contains(target.filterNot(Char::isWhitespace)) &&
+        !Regex("[0-9]+[:：分秒]|後|后|等待|已領|已领|倒數|倒数").containsMatchIn(value)
 }

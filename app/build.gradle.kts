@@ -12,10 +12,10 @@ android {
         applicationId = "com.example.csc"
         minSdk = 29
         targetSdk = 36
-        versionCode = 18
-        versionName = "1.17"
+        versionCode = 19
+        versionName = "1.18"
 
-        testInstrumentationRunner = "androidx.test.runner.AndroidJUnitRunner"
+        testInstrumentationRunner = "com.example.csc.NumberOcrDeviceCheck"
 
         targetAbi.orNull?.let { abi ->
             ndk {

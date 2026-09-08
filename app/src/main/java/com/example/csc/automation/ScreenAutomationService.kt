@@ -252,11 +252,18 @@ class ScreenAutomationService : AccessibilityService() {
             }
             return
         }
+        syncNumberTrackerGeneration(settings, foregroundPackage)
+        if (settings.numberMonitorEnabled && !settings.observationOnly && settings.numberTriggerZoneId != null &&
+            actionState.needsInitialPageSwipe()) {
+            scheduleSwipeUp("開始新直播觀看", actionSession = currentSession(settings))
+            return
+        }
         pruneReferenceCache(settings)
         val clicksAllowed = !prioritySwipePending.get() &&
             SystemClock.elapsedRealtime() - maxOf(lastClickAt, lastWouldActAt) >= settings.clickCooldownMs
         if (settings.targetCount == 0 && !settings.numberMonitorEnabled) return
-        if (clicksAllowed && settings.numberTriggerZoneId != null) {
+        if (clicksAllowed && settings.numberTriggerZoneId != null &&
+            (!settings.numberMonitorEnabled || actionState.canClaimReward(SystemClock.elapsedRealtime()))) {
             findConfiguredTextNode(settings, settings.numberTriggerZoneId)?.let { hit ->
                 val metrics = gestureDisplayMetrics()
                 tap(
@@ -451,8 +458,10 @@ class ScreenAutomationService : AccessibilityService() {
         val ocrRegion = ocrRegion(settings, textTargets)
         val preparedOcr = cropRecognitionRegionCopy(bitmap, ocrRegion)
         val ocrBitmap = preparedOcr.bitmap
+        var preparedNumber: PreparedBitmap? = null
         fun releaseOcrBitmap() {
             if (ocrBitmap !== bitmap && !ocrBitmap.isRecycled) ocrBitmap.recycle()
+            preparedNumber?.bitmap?.let { if (!it.isRecycled) it.recycle() }
         }
         val recognizer = if (textTargets.any { containsCjk(it.second.value) }) {
             chineseRecognizer
@@ -461,7 +470,22 @@ class ScreenAutomationService : AccessibilityService() {
         }
         val ocrStartedAt = SystemClock.elapsedRealtime()
         recognizer.process(InputImage.fromBitmap(ocrBitmap, 0))
-            .addOnSuccessListener { result ->
+            .continueWithTask { textTask ->
+                val textResult = textTask.getResult(Exception::class.java)
+                if (!settings.numberMonitorEnabled) {
+                    com.google.android.gms.tasks.Tasks.forResult(textResult to textResult)
+                } else {
+                    com.google.android.gms.tasks.Tasks.call(visionExecutor) {
+                        prepareNumberOcr(bitmap, settings)
+                    }.continueWithTask { imageTask ->
+                        val image = imageTask.getResult(Exception::class.java)
+                        preparedNumber = image
+                        latinRecognizer.process(InputImage.fromBitmap(image.bitmap, 0))
+                    }.continueWith { numberTask -> textResult to numberTask.getResult(Exception::class.java) }
+                }
+            }
+            .addOnSuccessListener { results ->
+                val result = results.first
                 frameProfile.ocrMs = SystemClock.elapsedRealtime() - ocrStartedAt
                 if (destroyed.get()) {
                     releaseOcrBitmap()
@@ -484,19 +508,21 @@ class ScreenAutomationService : AccessibilityService() {
                         bitmap.height,
                         preparedOcr.offsetX,
                         preparedOcr.offsetY,
+                        settings.numberMonitorEnabled && zone.id == settings.numberTriggerZoneId,
                     )?.let { bounds -> TextHit(zone, target, bounds) }
                 }
                 textTargetHoldingNumberCountdown = recognizedTextHits.isNotEmpty()
                 recognizedZoneIds += recognizedTextHits.map { it.zone.id }
                 if (isAnyRecognitionHoldingNumberCountdown(settings)) resetNumberAbsenceTracking()
                 observeNumbers(
-                    result,
+                    results.second,
                     settings,
                     capturePackage,
                     bitmap,
-                    preparedOcr.offsetX,
-                    preparedOcr.offsetY,
+                    preparedNumber?.offsetX ?: preparedOcr.offsetX,
+                    preparedNumber?.offsetY ?: preparedOcr.offsetY,
                     frameProfile.session,
+                    preparedNumber?.scale ?: 1f,
                 )
                 if (swipePending.get()) {
                     releaseOcrBitmap()
@@ -1103,6 +1129,7 @@ class ScreenAutomationService : AccessibilityService() {
         if (key == numberTrackerKey) return
         numberTrackerKey = key
         numberTrackerGeneration++
+        actionState.resetRewardPage()
         numberMonitorTracker.reset()
         resetNumberAbsenceTracking()
     }
@@ -1146,7 +1173,9 @@ class ScreenAutomationService : AccessibilityService() {
                 val metrics = gestureDisplayMetrics()
                 if (!bounds.isEmpty) {
                     configured.firstOrNull { (zone, _, target) ->
-                        nodeValues.any { it.contains(target) } &&
+                        nodeValues.any { it.contains(target) &&
+                            (!settings.numberMonitorEnabled || zone.id != settings.numberTriggerZoneId ||
+                                (node.isEnabled && isReadyClaimText(it, target))) } &&
                             zone.region.hasSafeClickArea(
                                 bounds.left.toFloat(),
                                 bounds.top.toFloat(),
@@ -1183,9 +1212,11 @@ class ScreenAutomationService : AccessibilityService() {
         screenHeight: Int,
         offsetX: Int,
         offsetY: Int,
+        requireClaimReady: Boolean = false,
     ): Rect? {
         val normalizedTarget = normalize(target)
         val lines = result.textBlocks.flatMap { it.lines }
+            .filter { !requireClaimReady || isReadyClaimText(it.text, target) }
         val candidates = buildList {
             // Prefer the individual OCR element. A line or block can span
             // several nearby controls and would make a valid random point hit
@@ -1195,7 +1226,8 @@ class ScreenAutomationService : AccessibilityService() {
                 .mapNotNullTo(this) { it.boundingBox?.offsetCopy(offsetX, offsetY) }
             lines.filter { normalize(it.text).contains(normalizedTarget) }
                 .mapNotNullTo(this) { it.boundingBox?.offsetCopy(offsetX, offsetY) }
-            result.textBlocks.filter { normalize(it.text).contains(normalizedTarget) }
+            result.textBlocks.filter { normalize(it.text).contains(normalizedTarget) &&
+                (!requireClaimReady || isReadyClaimText(it.text, target)) }
                 .mapNotNullTo(this) { it.boundingBox?.offsetCopy(offsetX, offsetY) }
         }
         return candidates
@@ -1219,22 +1251,23 @@ class ScreenAutomationService : AccessibilityService() {
         numberRegion: RecognitionRegion,
         bitmapWidth: Int,
         bitmapHeight: Int,
+        scale: Float,
     ): NumberRoiEvidence {
         val elements = line.elements.map { element ->
             NumberTextNode(
                 text = element.text,
-                bounds = element.boundingBox?.offsetCopy(offsetX, offsetY)?.toClickBounds(),
+                bounds = element.boundingBox?.let { ClickBounds(it.left / scale + offsetX, it.top / scale + offsetY, it.right / scale + offsetX, it.bottom / scale + offsetY) },
                 children = element.symbols.map { symbol ->
                     NumberTextNode(
                         text = symbol.text,
-                        bounds = symbol.boundingBox?.offsetCopy(offsetX, offsetY)?.toClickBounds(),
+                        bounds = symbol.boundingBox?.let { ClickBounds(it.left / scale + offsetX, it.top / scale + offsetY, it.right / scale + offsetX, it.bottom / scale + offsetY) },
                     )
                 },
             )
         }
         return collectNumberRoiEvidence(
             lineText = line.text,
-            lineBounds = line.boundingBox?.offsetCopy(offsetX, offsetY)?.toClickBounds(),
+            lineBounds = line.boundingBox?.let { ClickBounds(it.left / scale + offsetX, it.top / scale + offsetY, it.right / scale + offsetX, it.bottom / scale + offsetY) },
             elements = elements,
             numberRegion = numberRegion,
             bitmapWidth = bitmapWidth,
@@ -1250,6 +1283,7 @@ class ScreenAutomationService : AccessibilityService() {
         offsetX: Int,
         offsetY: Int,
         capturedSession: AutomationSession?,
+        scale: Float = 1f,
     ) {
         if (!settings.numberMonitorEnabled || foregroundPackage != capturePackage ||
             !isSessionCurrent(capturedSession)
@@ -1282,11 +1316,17 @@ class ScreenAutomationService : AccessibilityService() {
                 numberRegion = settings.numberMonitorRegion,
                 bitmapWidth = bitmap.width,
                 bitmapHeight = bitmap.height,
+                scale = scale,
             )
             hasNumericText = hasNumericText || lineEvidence.hasNumericText
             numericTextMissingBounds = numericTextMissingBounds || lineEvidence.missingNumericBounds
             numericLocations += lineEvidence.numericLocations
-            val tokens = rebuildNumberTokens(lineEvidence.elements)
+            val numberElements = if (filterColor != null) recoverNumberDecimalPoints(lineEvidence.elements) { x, y ->
+                x in 0 until bitmap.width && y in 0 until bitmap.height &&
+                    settings.numberMonitorRegion.containsBounds(x.toFloat(), y.toFloat(), (x+1).toFloat(), (y+1).toFloat(), bitmap.width, bitmap.height) &&
+                    matchesNumberInk(bitmap.getPixel(x, y), filterColor, settings.numberColorTolerance)
+            } else lineEvidence.elements
+            val tokens = rebuildNumberTokens(numberElements)
             if (tokens.isEmpty()) {
                 if (lineEvidence.hasNumericText) {
                     if (lineEvidence.missingNumericBounds || line.elements.isEmpty()) {
@@ -1381,6 +1421,10 @@ class ScreenAutomationService : AccessibilityService() {
         }
         val priorityPending = prioritySwipePending.get()
         val observedNumber = classifyNumberObservation(values, hasNumericText, invalidReasons)
+        val rewardValue = (observedNumber as? NumberMonitorTracker.Observation.Value)?.value
+        actionState.recordRewardNumber(SystemClock.elapsedRealtime(), rewardValue != null &&
+            rewardValue + NUMBER_BOUNDARY_EPSILON >= settings.numberMonitorThreshold &&
+            rewardValue - NUMBER_BOUNDARY_EPSILON <= settings.numberMonitorUpperLimit)
         val trackerAction = numberMonitorTracker.observe(
             nowMs = SystemClock.elapsedRealtime(),
             observation = observedNumber,
@@ -1487,6 +1531,7 @@ class ScreenAutomationService : AccessibilityService() {
         if (!settings.numberMonitorEnabled || foregroundPackage != capturePackage ||
             !isSessionCurrent(capturedSession)
         ) return
+        actionState.recordRewardNumber(SystemClock.elapsedRealtime(), false)
         syncNumberTrackerGeneration(settings, capturePackage)
         val action = numberMonitorTracker.observe(
             nowMs = SystemClock.elapsedRealtime(),
@@ -1645,26 +1690,26 @@ class ScreenAutomationService : AccessibilityService() {
         val top = bounds.top.coerceIn(0, bitmap.height - 1)
         val right = bounds.right.coerceIn(left + 1, bitmap.width)
         val bottom = bounds.bottom.coerceIn(top + 1, bitmap.height)
-        val step = maxOf(1, minOf(right - left, bottom - top) / 40)
-        val targetRed = Color.red(targetColor)
-        val targetGreen = Color.green(targetColor)
-        val targetBlue = Color.blue(targetColor)
-        val allowedDistance = tolerance * tolerance * 3
-        var matches = 0
-        var samples = 0
-        for (y in top until bottom step step) {
-            for (x in left until right step step) {
-                samples++
-                val color = bitmap.getPixel(x, y)
-                val red = Color.red(color) - targetRed
-                val green = Color.green(color) - targetGreen
-                val blue = Color.blue(color) - targetBlue
-                if (red * red + green * green + blue * blue <= allowedDistance) matches++
+        var surroundSamples = 0
+        var surroundMatches = 0
+        for (y in (top-2).coerceAtLeast(0) until (bottom+2).coerceAtMost(bitmap.height)) {
+            for (x in (left-2).coerceAtLeast(0) until (right+2).coerceAtMost(bitmap.width)) {
+                if (x in left until right && y in top until bottom) continue
+                surroundSamples++
+                if (matchesNumberInk(bitmap.getPixel(x,y), targetColor, tolerance)) surroundMatches++
             }
         }
-        return when {
-            hasSufficientNumberColorCoverage(matches, samples) -> NumberColorAssessment.MATCH
-            samples >= MIN_NUMBER_COLOR_MISMATCH_SAMPLES && matches == 0 -> NumberColorAssessment.MISMATCH
+        if (surroundSamples >= 8 && surroundMatches > surroundSamples * 0.65) {
+            return NumberColorAssessment.MISMATCH
+        }
+        val width = right - left
+        val height = bottom - top
+        val mask = BooleanArray(width * height) { index ->
+            matchesNumberInk(bitmap.getPixel(left + index % width, top + index / width), targetColor, tolerance)
+        }
+        return when (classifyNumberInk(mask, width, height)) {
+            1 -> NumberColorAssessment.MATCH
+            -1 -> NumberColorAssessment.MISMATCH
             else -> NumberColorAssessment.UNCERTAIN
         }
     }
@@ -1685,11 +1730,12 @@ class ScreenAutomationService : AccessibilityService() {
     }
 
     private fun isAnyRecognitionHoldingNumberCountdown(settings: AutomationSettings): Boolean =
-        settings.numberMonitorEnabled && (
-            circleXHoldingNumberCountdown ||
-                textTargetHoldingNumberCountdown ||
-                imageTargetHoldingNumberCountdown
-            )
+        settings.numberMonitorEnabled && if (settings.numberTriggerZoneId != null) {
+            // The claim button itself must not hide a missing/wrong reward number.
+            hasRecognitionOutsideTriggerZone(recognizedZoneIds, settings.numberTriggerZoneId)
+        } else {
+            circleXHoldingNumberCountdown || textTargetHoldingNumberCountdown || imageTargetHoldingNumberCountdown
+        }
 
     private fun renderNumberOverlay() {
         val settings = AutomationConfig.read(this)
@@ -2065,6 +2111,8 @@ class ScreenAutomationService : AccessibilityService() {
                             clearPrioritySwipeTracking()
                         }
                         actionState.gestureFinished()
+                        actionState.rewardPageOpened(SystemClock.elapsedRealtime() + POST_SWIPE_SETTLE_MS)
+                        numberMonitorTracker.reset()
                         adaptiveScan.markGesture(SystemClock.elapsedRealtime())
                         resetNumberAbsenceTracking()
                         val dailyCount = if (priority) {
@@ -2152,6 +2200,11 @@ class ScreenAutomationService : AccessibilityService() {
         val settings = AutomationConfig.read(this)
         if (!settings.enabled || !isTargetForeground(settings)) return
         if (prioritySwipePending.get()) return
+        if (settings.numberMonitorEnabled && settings.numberTriggerZoneId == zoneId &&
+            !actionState.canClaimReward(SystemClock.elapsedRealtime())) {
+            lastResult = "等待觀看時間與合格數字，領取按鈕出現後再領取"
+            return
+        }
         val metrics = gestureDisplayMetrics()
         val gestureBounds = mapClickBoundsToScreen(
             targetBounds,
@@ -2268,8 +2321,10 @@ class ScreenAutomationService : AccessibilityService() {
         imageTargetId: String?,
         actionToken: ActionToken,
     ) {
-        if (!isActionCurrent(actionToken)) {
-            cancelPendingClick(zoneId, "動作狀態已改變")
+        if (!isActionCurrent(actionToken) ||
+            (settings.numberMonitorEnabled && settings.numberTriggerZoneId == zoneId &&
+                !actionState.canClaimReward(SystemClock.elapsedRealtime()))) {
+            cancelPendingClick(zoneId, "動作狀態或領取條件已改變")
             return
         }
         if (settings.observationOnly) {
@@ -2564,6 +2619,32 @@ class ScreenAutomationService : AccessibilityService() {
         )
     }
 
+    /** Isolate number ink and preserve one-pixel decimal points when enlarging. */
+    private fun prepareNumberOcr(source: Bitmap, settings: AutomationSettings): PreparedBitmap {
+        val roi = settings.numberMonitorRegion.normalized()
+        val mx = 8f / source.width
+        val my = 8f / source.height
+        val crop = cropRecognitionRegionCopy(source, RecognitionRegion(
+            (roi.left - mx).coerceAtLeast(0f), (roi.top - my).coerceAtLeast(0f),
+            (roi.right + mx).coerceAtMost(1f), (roi.bottom + my).coerceAtMost(1f),
+        ))
+        val input = crop.bitmap.copy(Bitmap.Config.ARGB_8888, true)
+        if (crop.bitmap !== source) crop.bitmap.recycle()
+        val target = if (settings.numberColorFilterEnabled) runCatching {
+            Color.parseColor(settings.numberColorHex.trim())
+        }.getOrNull() else null
+        if (target != null) {
+            val pixels = IntArray(input.width * input.height)
+            input.getPixels(pixels, 0, input.width, 0, 0, input.width, input.height)
+            for (i in pixels.indices) pixels[i] = if (matchesNumberInk(pixels[i], target, settings.numberColorTolerance)) Color.BLACK else Color.WHITE
+            input.setPixels(pixels, 0, input.width, 0, 0, input.width, input.height)
+        }
+        val scale = if (maxOf(input.width, input.height) <= 640) 3 else 1
+        val enlarged = if (scale > 1) Bitmap.createScaledBitmap(input, input.width * scale, input.height * scale, false) else input
+        if (enlarged !== input) input.recycle()
+        return PreparedBitmap(enlarged, crop.offsetX, crop.offsetY, scale.toFloat())
+    }
+
     private fun cropRecognitionRegionCopy(
         source: Bitmap,
         region: RecognitionRegion,
@@ -2820,6 +2901,7 @@ class ScreenAutomationService : AccessibilityService() {
         val bitmap: Bitmap,
         val offsetX: Int,
         val offsetY: Int,
+        val scale: Float = 1f,
     )
 
     private enum class NumberColorAssessment {
