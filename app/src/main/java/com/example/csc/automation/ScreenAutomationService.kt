@@ -27,6 +27,7 @@ import android.provider.MediaStore
 import android.view.Display
 import android.view.Gravity
 import android.view.View
+import android.view.WindowInsets
 import android.view.WindowManager
 import android.view.accessibility.AccessibilityEvent
 import android.view.accessibility.AccessibilityNodeInfo
@@ -46,6 +47,7 @@ import com.google.mlkit.vision.text.TextRecognition
 import com.google.mlkit.vision.text.TextRecognizer
 import com.google.mlkit.vision.text.chinese.ChineseTextRecognizerOptions
 import com.google.mlkit.vision.text.latin.TextRecognizerOptions
+import java.time.LocalDate
 import java.util.ArrayDeque
 import java.util.Locale
 import java.util.concurrent.Executors
@@ -90,6 +92,13 @@ class ScreenAutomationService : AccessibilityService() {
     private var lastNotificationAt = 0L
     private var clickMarkerView: View? = null
     private var recognitionRegionOverlayView: RecognitionRegionOverlayView? = null
+    private var dailyStats: DailyStatsOverlayState? = null
+    private var dailyStatsRefreshScheduled = false
+    private val dailyStatsRefreshRunnable = Runnable {
+        dailyStatsRefreshScheduled = false
+        val settings = AutomationConfig.read(this)
+        syncRecognitionRegionOverlay(overlayRegions(settings), settings.enabled && isTargetForeground(settings))
+    }
     private var numberAbsenceRunnable: Runnable? = null
     private var triggerSwipeRunnable: Runnable? = null
     private var numberCountdownDeadline = 0L
@@ -150,6 +159,7 @@ class ScreenAutomationService : AccessibilityService() {
             ?: return
         if (activePackage == foregroundPackage) return
         cancelPendingAutomation()
+        removeRecognitionRegionOverlay()
         foregroundPackage = activePackage
         sessionGate.invalidate()
         // A scan may have intentionally stopped while automation was disabled. Wake it whenever
@@ -190,6 +200,7 @@ class ScreenAutomationService : AccessibilityService() {
     override fun onInterrupt() {
         RuntimeArming.setArmed(false)
         cancelPendingAutomation()
+        removeRecognitionRegionOverlay()
         lastResult = "服務被系統中斷，請重新啟用"
     }
 
@@ -2181,12 +2192,19 @@ class ScreenAutomationService : AccessibilityService() {
                         adaptiveScan.markGesture(SystemClock.elapsedRealtime())
                         resetNumberAbsenceTracking()
                         val dailyCount = if (priority) {
-                            DailyTriggerStats.recordCompletedSwipe(this@ScreenAutomationService)
+                            DailyTriggerStats.recordCompletedSwipe(this@ScreenAutomationService, LocalDate.now())
                         } else null
                         lastResult = if (dailyCount != null) {
                             "已向上滑：$reason；今日第 $dailyCount 次"
                         } else {
                             "已向上滑：$reason"
+                        }
+                        if (dailyCount != null) {
+                            dailyStats = null
+                            val latest = AutomationConfig.read(this@ScreenAutomationService)
+                            runCatching {
+                                syncRecognitionRegionOverlay(overlayRegions(latest), latest.enabled && isTargetForeground(latest))
+                            }.onFailure { Log.w(TAG, "Daily overlay refresh failed", it) }
                         }
                         showOrHideNotification(AutomationConfig.read(this@ScreenAutomationService))
                         mainHandler.removeCallbacks(scanRunnable)
@@ -2803,14 +2821,29 @@ class ScreenAutomationService : AccessibilityService() {
         regions: List<OverlayRegion>,
         visible: Boolean,
     ) {
-        if (!visible || regions.isEmpty()) {
+        val settings = AutomationConfig.read(this)
+        if (!visible || destroyed.get() || !settings.enabled || !isTargetForeground(settings) ||
+            rootInActiveWindow?.packageName?.toString() != settings.targetPackage) {
             removeRecognitionRegionOverlay()
             return
         }
+        val today = LocalDate.now()
+        if (dailyStats == null || dailyStats?.date != today ||
+            (dailyStats?.count == null && !dailyStatsRefreshScheduled)) {
+            dailyStats = DailyStatsOverlayState(today, runCatching {
+                DailyTriggerStats.lastThreeDays(this, today).first().count
+            }.onFailure { Log.w(TAG, "Daily statistics unavailable", it) }.getOrNull())
+        }
+        if (!dailyStatsRefreshScheduled) {
+            dailyStatsRefreshScheduled = true
+            mainHandler.postDelayed(dailyStatsRefreshRunnable, 30_000L)
+        }
         val screenMetrics = gestureDisplayMetrics()
+        val samples = dailyStatsSamplingRegions(settings, screenMetrics.widthPixels, screenMetrics.heightPixels)
         recognitionRegionOverlayView?.let {
             it.setScreenSize(screenMetrics.widthPixels, screenMetrics.heightPixels)
             it.setRegions(regions)
+            it.setDailyStats(dailyStats, samples)
             return
         }
 
@@ -2818,7 +2851,7 @@ class ScreenAutomationService : AccessibilityService() {
             context = this,
             screenWidth = screenMetrics.widthPixels,
             screenHeight = screenMetrics.heightPixels,
-        ).apply { setRegions(regions) }
+        ).apply { setRegions(regions); setDailyStats(dailyStats, samples) }
         val params = WindowManager.LayoutParams(
             WindowManager.LayoutParams.MATCH_PARENT,
             WindowManager.LayoutParams.MATCH_PARENT,
@@ -2834,7 +2867,24 @@ class ScreenAutomationService : AccessibilityService() {
         }
     }
 
+    private fun dailyStatsSamplingRegions(settings: AutomationSettings, width: Int, height: Int): List<RecognitionRegion> = buildList {
+        // Visual/verification crops use zones; OCR uses a padded union and an 8px number fallback.
+        settings.zones.filter { it.targets.isNotEmpty() }.mapTo(this) { it.region }
+        val texts = settings.zones.flatMap { zone ->
+            zone.targets.filter { it.mode == TargetMode.TEXT }.map { zone to it }
+        }
+        if (texts.isNotEmpty() || settings.numberMonitorEnabled) add(ocrRegion(settings, texts))
+        if (settings.numberMonitorEnabled) {
+            val r = settings.numberMonitorRegion.normalized()
+            add(RecognitionRegion(r.left - 8f / width.coerceAtLeast(1), r.top - 8f / height.coerceAtLeast(1),
+                r.right + 8f / width.coerceAtLeast(1), r.bottom + 8f / height.coerceAtLeast(1)).normalized())
+        }
+    }
+
     private fun removeRecognitionRegionOverlay() {
+        mainHandler.removeCallbacks(dailyStatsRefreshRunnable)
+        dailyStatsRefreshScheduled = false
+        dailyStats = null
         val overlay = recognitionRegionOverlayView ?: return
         recognitionRegionOverlayView = null
         runCatching { getSystemService(WindowManager::class.java).removeViewImmediate(overlay) }
@@ -3162,6 +3212,74 @@ class ScreenAutomationService : AccessibilityService() {
             style = Paint.Style.FILL
         }
         private var regions = emptyList<OverlayRegion>()
+        private var dailyStats: DailyStatsOverlayState? = null
+        private var samplingRegions = emptyList<RecognitionRegion>()
+        private val dailyTextPaint = Paint(Paint.ANTI_ALIAS_FLAG).apply {
+            color = Color.WHITE
+            typeface = android.graphics.Typeface.DEFAULT_BOLD
+        }
+        private val dailyBackgroundPaint = Paint(Paint.ANTI_ALIAS_FLAG).apply { color = Color.argb(210, 25, 25, 30) }
+        private val drawnLabels = mutableListOf<DailyStatsRect>()
+        private var dailyHiddenReason: String? = null
+
+        fun setDailyStats(value: DailyStatsOverlayState?, samples: List<RecognitionRegion>) {
+            if (dailyStats == value && samplingRegions == samples) return
+            dailyStats = value
+            samplingRegions = samples
+            invalidate()
+        }
+
+        override fun onConfigurationChanged(newConfig: android.content.res.Configuration) {
+            super.onConfigurationChanged(newConfig)
+            invalidate()
+        }
+
+        override fun onApplyWindowInsets(insets: WindowInsets): WindowInsets {
+            invalidate()
+            return super.onApplyWindowInsets(insets)
+        }
+
+        private fun drawDailyStats(canvas: Canvas, location: IntArray) {
+            val state = dailyStats ?: return
+            val insets = rootWindowInsets
+            var reason: String? = null
+            val panel = if (insets == null) null else {
+                val bars = if (Build.VERSION.SDK_INT >= 30) {
+                    insets.getInsetsIgnoringVisibility(WindowInsets.Type.systemBars() or WindowInsets.Type.displayCutout())
+                } else {
+                    @Suppress("DEPRECATION")
+                    android.graphics.Insets.of(
+                        maxOf(insets.stableInsetLeft, insets.displayCutout?.safeInsetLeft ?: 0),
+                        maxOf(insets.stableInsetTop, insets.displayCutout?.safeInsetTop ?: 0),
+                        maxOf(insets.stableInsetRight, insets.displayCutout?.safeInsetRight ?: 0),
+                        maxOf(insets.stableInsetBottom, insets.displayCutout?.safeInsetBottom ?: 0))
+                }
+                val safe = DailyStatsRect(maxOf(0f, bars.left.toFloat() - location[0]),
+                    maxOf(0f, bars.top.toFloat() - location[1]),
+                    minOf(width.toFloat(), screenWidth.toFloat() - bars.right - location[0]),
+                    minOf(height.toFloat(), screenHeight.toFloat() - bars.bottom - location[1]))
+                dailyTextPaint.textSize = android.util.TypedValue.applyDimension(
+                    android.util.TypedValue.COMPLEX_UNIT_SP, 14f, resources.displayMetrics)
+                val fm = dailyTextPaint.fontMetrics
+                dailyStatsPanel(safe, dailyTextPaint.measureText(state.text) + 16f * density,
+                    fm.bottom - fm.top + 12f * density, 8f * density)
+            }
+            if (panel == null) reason = "統計安全區或顯示尺寸不足"
+            else if (samplingRegions.any {
+                val r = mapRecognitionRegionToOverlay(it, screenWidth, screenHeight, location[0], location[1])
+                // Include integer crop rounding.
+                panel.intersects(DailyStatsRect(r.left - 2f, r.top - 2f, r.right + 2f, r.bottom + 2f))
+            }) reason = "右上角統計因辨識範圍重疊暫停顯示"
+            else if (drawnLabels.any { panel.intersects(it) }) reason = "右上角統計因狀態標籤重疊暫停顯示"
+            if (reason != dailyHiddenReason) {
+                Log.i(TAG, reason ?: "右上角統計恢復顯示")
+                dailyHiddenReason = reason
+            }
+            if (panel == null || reason != null) return
+            canvas.drawRoundRect(panel.left, panel.top, panel.right, panel.bottom, 6f * density, 6f * density, dailyBackgroundPaint)
+            canvas.drawText(state.text, panel.left + 8f * density,
+                panel.top + 6f * density - dailyTextPaint.fontMetrics.top, dailyTextPaint)
+        }
 
         fun setScreenSize(width: Int, height: Int) {
             if (screenWidth == width && screenHeight == height) return
@@ -3182,6 +3300,7 @@ class ScreenAutomationService : AccessibilityService() {
             val inset = framePaint.strokeWidth / 2f
             val location = IntArray(2)
             getLocationOnScreen(location)
+            drawnLabels.clear()
             regions.forEachIndexed { index, item ->
                 val region = mapRecognitionRegionToOverlay(
                     region = item.region,
@@ -3200,6 +3319,7 @@ class ScreenAutomationService : AccessibilityService() {
                     drawSimilarityLabel(canvas, item, index, left, top, right, bottom)
                 }
             }
+            drawDailyStats(canvas, location)
         }
 
         private fun drawSimilarityLabel(
@@ -3234,6 +3354,7 @@ class ScreenAutomationService : AccessibilityService() {
             }
             val labelLeft = rawLeft.coerceIn(0f, (width - labelWidth).coerceAtLeast(0f))
             val labelTop = rawTop.coerceIn(0f, (height - labelHeight).coerceAtLeast(0f))
+            drawnLabels.add(DailyStatsRect(labelLeft, labelTop, labelLeft + labelWidth, labelTop + labelHeight))
             labelBackgroundPaint.color = frameColors[index % frameColors.size]
             canvas.drawRect(labelLeft, labelTop, labelLeft + labelWidth, labelTop + labelHeight, labelBackgroundPaint)
             canvas.save()

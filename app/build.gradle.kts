@@ -12,8 +12,8 @@ android {
         applicationId = "com.example.csc"
         minSdk = 29
         targetSdk = 36
-        versionCode = 21
-        versionName = "1.20"
+        versionCode = 22
+        versionName = "1.21"
 
         testInstrumentationRunner = providers.gradleProperty("deviceRunner").getOrElse("com.example.csc.NumberOcrDeviceCheck")
 

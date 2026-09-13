@@ -641,15 +641,9 @@ class MainActivity : Activity() {
 
     private fun refreshDailyTriggerStats() {
         if (!::dailyTriggerStatsText.isInitialized) return
-        val counts = DailyTriggerStats.lastThreeDays(this, LocalDate.now())
-        dailyTriggerStatsText.text = counts.mapIndexed { index, item ->
-            val label = when (index) {
-                0 -> "今日"
-                1 -> "昨日"
-                else -> "前日"
-            }
-            "$label ${item.count} 次"
-        }.joinToString("　")
+        dailyTriggerStatsText.text = runCatching {
+            "今日 ${DailyTriggerStats.lastThreeDays(this, LocalDate.now()).first().count} 次"
+        }.getOrElse { "統計暫不可用" }
     }
 
     private fun addZoneEditor(zone: RecognitionZone) {
