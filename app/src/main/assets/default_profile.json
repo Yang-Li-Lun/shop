@@ -1,5 +1,5 @@
 {
-  "enabled": true,
+  "enabled": false,
   "targetPackage": "com.shopee.tw",
   "matchThreshold": 0.75,
   "circleXThreshold": 0.85,

@@ -12,8 +12,8 @@ android {
         applicationId = "com.example.csc"
         minSdk = 29
         targetSdk = 36
-        versionCode = 19
-        versionName = "1.18"
+        versionCode = 20
+        versionName = "1.19"
 
         testInstrumentationRunner = "com.example.csc.NumberOcrDeviceCheck"
 

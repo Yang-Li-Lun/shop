@@ -58,7 +58,6 @@ import kotlin.math.roundToInt
 class ScreenAutomationService : AccessibilityService() {
     private val mainHandler = Handler(Looper.getMainLooper())
     private val visionExecutor = Executors.newSingleThreadExecutor()
-    private val processing = AtomicBoolean(false)
     private val clickPending = AtomicBoolean(false)
     private val swipePending = AtomicBoolean(false)
     private val prioritySwipePending = AtomicBoolean(false)
@@ -77,7 +76,7 @@ class ScreenAutomationService : AccessibilityService() {
 
     private var foregroundPackage: String? = null
     private var lastClickAt = 0L
-    private val cachedReferences = mutableMapOf<String, Bitmap>()
+    private val cachedReferences = LinkedHashMap<String, Bitmap>(24, 0.75f, true)
     private val referenceCacheLock = Any()
     private val unavailableReferenceUntil = ConcurrentHashMap<String, Long>()
     private val zoneSimilarities = mutableMapOf<String, Float>()
@@ -137,6 +136,8 @@ class ScreenAutomationService : AccessibilityService() {
 
     override fun onServiceConnected() {
         super.onServiceConnected()
+        RuntimeArming.setArmed(false)
+        cancelPendingAutomation()
         connected = true
         lastResult = "服務已連線"
         mainHandler.removeCallbacks(scanRunnable)
@@ -148,6 +149,7 @@ class ScreenAutomationService : AccessibilityService() {
             ?: event?.packageName?.toString()
             ?: return
         if (activePackage == foregroundPackage) return
+        cancelPendingAutomation()
         foregroundPackage = activePackage
         sessionGate.invalidate()
         // A scan may have intentionally stopped while automation was disabled. Wake it whenever
@@ -157,18 +159,49 @@ class ScreenAutomationService : AccessibilityService() {
         mainHandler.post(scanRunnable)
     }
 
+    private fun cancelPendingAutomation() {
+        sessionGate.invalidate()
+        clearGestureWatchdog()
+        // Keep resource-owning result callbacks queued; their session checks discard stale work.
+        mainHandler.removeCallbacks(scanRunnable)
+        triggerSwipeRunnable?.let(mainHandler::removeCallbacks)
+        numberAbsenceRunnable?.let(mainHandler::removeCallbacks)
+        mainHandler.removeCallbacks(numberCountdownRunnable)
+        actionState.cancel()
+        actionState.resetRewardPage()
+        clickPending.set(false)
+        swipePending.set(false)
+        prioritySwipePending.set(false)
+        pendingClickZoneId = null
+        clearPrioritySwipeTracking()
+        resetNumberAbsenceTracking()
+        numberAbsenceRunnable = null
+        triggerSwipeRunnable = null
+        numberMonitorTracker.reset()
+        numberTrackerKey = null
+        numberPriorityPassPending = false
+        circleXHoldingNumberCountdown = false
+        textTargetHoldingNumberCountdown = false
+        imageTargetHoldingNumberCountdown = false
+        recognizedZoneIds.clear()
+        resetImageEvidence()
+    }
+
     override fun onInterrupt() {
-        lastResult = "服務被系統中斷"
+        RuntimeArming.setArmed(false)
+        cancelPendingAutomation()
+        lastResult = "服務被系統中斷，請重新啟用"
     }
 
     override fun onDestroy() {
+        RuntimeArming.setArmed(false)
         destroyed.set(true)
         sessionGate.invalidate()
         clearGestureWatchdog()
         connected = false
         instance = null
         mainHandler.removeCallbacksAndMessages(null)
-        processing.set(false)
+        actionState.invalidateRecognition()
         clickPending.set(false)
         swipePending.set(false)
         prioritySwipePending.set(false)
@@ -228,6 +261,7 @@ class ScreenAutomationService : AccessibilityService() {
         )
         showOrHideNotification(settings)
         if (!settings.enabled) {
+            cancelPendingAutomation()
             resetImageEvidence()
             mainHandler.removeCallbacks(scanRunnable)
             return
@@ -241,7 +275,7 @@ class ScreenAutomationService : AccessibilityService() {
         mainHandler.postDelayed(scanRunnable, nextDelay)
 
         if (
-            !settings.enabled || processing.get() || clickPending.get() || swipePending.get() ||
+            !settings.enabled || actionState.isRecognitionInFlight || clickPending.get() || swipePending.get() ||
             actionState.blocksRecognition()
         ) return
         if (!targetForeground) {
@@ -258,7 +292,7 @@ class ScreenAutomationService : AccessibilityService() {
             scheduleSwipeUp("開始新直播觀看", actionSession = currentSession(settings))
             return
         }
-        pruneReferenceCache(settings)
+        visionExecutor.execute { pruneReferenceCache(settings) }
         val clicksAllowed = !prioritySwipePending.get() &&
             SystemClock.elapsedRealtime() - maxOf(lastClickAt, lastWouldActAt) >= settings.clickCooldownMs
         if (settings.targetCount == 0 && !settings.numberMonitorEnabled) return
@@ -296,12 +330,8 @@ class ScreenAutomationService : AccessibilityService() {
     }
 
     private fun captureAndRecognize(settings: AutomationSettings, clicksAllowed: Boolean) {
-        if (!processing.compareAndSet(false, true)) return
-        if (!actionState.tryStartRecognition()) {
-            processing.set(false)
-            return
-        }
-        val frameProfile = FrameProfile().also { it.session = currentSession(settings) }
+        val frameId = actionState.startRecognitionFrame() ?: return
+        val frameProfile = FrameProfile(frameId).also { it.session = currentSession(settings) }
         val capturePackage = foregroundPackage
         if (Build.VERSION.SDK_INT < 30) {
             MediaProjectionCaptureService.requestFrame { bitmap ->
@@ -313,7 +343,7 @@ class ScreenAutomationService : AccessibilityService() {
                         bitmap?.recycle()
                         return@post
                     }
-                    if (!isSessionCurrent(frameProfile.session)) {
+                    if (!isFrameCurrent(frameProfile)) {
                         bitmap?.recycle()
                         finishProcessing(frameProfile)
                         return@post
@@ -362,7 +392,7 @@ class ScreenAutomationService : AccessibilityService() {
                         bitmap.recycle()
                         return
                     }
-                    if (!isSessionCurrent(frameProfile.session)) {
+                    if (!isFrameCurrent(frameProfile)) {
                         bitmap.recycle()
                         finishProcessing(frameProfile)
                         return
@@ -389,7 +419,7 @@ class ScreenAutomationService : AccessibilityService() {
         clicksAllowed: Boolean,
         frameProfile: FrameProfile,
     ) {
-        if (!isSessionCurrent(frameProfile.session)) {
+        if (!isFrameCurrent(frameProfile)) {
             bitmap.recycle()
             finishProcessing(frameProfile)
             return
@@ -865,8 +895,9 @@ class ScreenAutomationService : AccessibilityService() {
                 mainHandler.post {
                     frameProfile.mainCallbackWaitMs += frameProfile.elapsedSincePostMs()
                     if (destroyed.get()) return@post
+                    try {
                     val completedHits = hits
-                    val relevant = resultIsStillRelevant(settings, capturePackage, frameProfile.session)
+                    val relevant = isFrameCurrent(frameProfile) && resultIsStillRelevant(settings, capturePackage, frameProfile.session)
                     if (relevant) {
                         zoneSimilarities.keys.retainAll(imageZones.map { it.id }.toSet())
                         zoneSimilarities.putAll(currentSimilarities)
@@ -953,23 +984,32 @@ class ScreenAutomationService : AccessibilityService() {
                     } else if (!settings.numberMonitorEnabled) {
                         lastResult = "尚未找到目標（${settings.zones.size} 個區域）"
                     }
-                    frameProfile.log()
+                    } finally {
+                        finishProcessing(frameProfile)
+                    }
                 }
             } catch (error: Throwable) {
-                lastResult = "視覺辨識失敗：${error.localizedMessage ?: "未知錯誤"}"
+                mainHandler.post {
+                    if (isFrameCurrent(frameProfile)) lastResult = "視覺辨識失敗：${error.localizedMessage ?: "未知錯誤"}"
+                    finishProcessing(frameProfile)
+                }
             } finally {
                 bitmap.recycle()
-                finishProcessing()
             }
         }
     }
 
-    private fun finishProcessing(frameProfile: FrameProfile? = null) {
-        frameProfile?.log()
-        processing.set(false)
-        actionState.recognitionFinished()
-    }
+    private fun isFrameCurrent(frameProfile: FrameProfile): Boolean =
+        actionState.isFrameCurrent(frameProfile.frameId) && isSessionCurrent(frameProfile.session)
 
+    private fun finishProcessing(frameProfile: FrameProfile) {
+        if (Looper.myLooper() != Looper.getMainLooper()) {
+            mainHandler.post { finishProcessing(frameProfile) }
+            return
+        }
+        frameProfile.log()
+        actionState.finishRecognitionFrame(frameProfile.frameId)
+    }
     private fun loadReference(uriString: String): Bitmap? {
         if (destroyed.get()) return null
         synchronized(referenceCacheLock) {
@@ -1015,7 +1055,16 @@ class ScreenAutomationService : AccessibilityService() {
                 bitmap.recycle()
                 null
             } else {
-                cachedReferences.put(uriString, bitmap)?.takeIf { it !== bitmap }?.recycle()
+                cachedReferences.put(uriString, bitmap)?.takeIf { it !== bitmap }?.let {
+                    TemplateMatcher.evict(it)
+                    it.recycle()
+                }
+                while (cachedReferences.size > 24) {
+                    val oldest = cachedReferences.entries.first()
+                    cachedReferences.remove(oldest.key)
+                    TemplateMatcher.evict(oldest.value)
+                    if (!oldest.value.isRecycled) oldest.value.recycle()
+                }
                 bitmap
             }
         }
@@ -1030,23 +1079,26 @@ class ScreenAutomationService : AccessibilityService() {
             cachedReferences.keys.filterNot(activeUris::contains).mapNotNull(cachedReferences::remove)
         }
         unavailableReferenceUntil.keys.filterNot(activeUris::contains).forEach(unavailableReferenceUntil::remove)
-        removed.forEach { if (!it.isRecycled) it.recycle() }
+        removed.forEach { TemplateMatcher.evict(it); if (!it.isRecycled) it.recycle() }
     }
 
     private fun releaseReferencesAfterVisionStops() {
         Thread({
-            var terminated = false
-            while (!terminated) {
-                terminated = try {
-                    visionExecutor.awaitTermination(1L, TimeUnit.SECONDS)
-                } catch (_: InterruptedException) {
-                    false
-                }
+            val terminated = try {
+                visionExecutor.awaitTermination(5L, TimeUnit.SECONDS)
+            } catch (_: InterruptedException) {
+                Thread.currentThread().interrupt()
+                false
+            }
+            if (!terminated) {
+                // A worker may still own these Bitmaps. Let GC reclaim them after it exits.
+                Log.w(TAG, "Reference cleanup timed out; skipping unsafe recycle")
+                return@Thread
             }
             val references = synchronized(referenceCacheLock) {
                 cachedReferences.values.toList().also { cachedReferences.clear() }
             }
-            references.forEach { if (!it.isRecycled) it.recycle() }
+            references.forEach { TemplateMatcher.evict(it); if (!it.isRecycled) it.recycle() }
         }, "csc-reference-cleanup").start()
     }
 
@@ -1088,7 +1140,7 @@ class ScreenAutomationService : AccessibilityService() {
     private fun currentSession(settings: AutomationSettings): AutomationSession = sessionGate.update(
         targetPackage = settings.targetPackage,
         foregroundPackage = foregroundPackage,
-        configSignature = settings.sessionSignature(),
+        configSignature = 31 * settings.sessionSignature() + displayGeometrySignature(),
         projectionGeneration = if (Build.VERSION.SDK_INT < 30) {
             MediaProjectionCaptureService.projectionGeneration
         } else {
@@ -1096,14 +1148,22 @@ class ScreenAutomationService : AccessibilityService() {
         },
     )
 
+    @Suppress("DEPRECATION")
+    private fun displayGeometrySignature(): Int {
+        val metrics = gestureDisplayMetrics()
+        val rotation = getSystemService(WindowManager::class.java)?.defaultDisplay?.rotation ?: 0
+        return listOf(metrics.widthPixels, metrics.heightPixels, metrics.densityDpi, rotation).hashCode()
+    }
+
     private fun isSessionCurrent(session: AutomationSession?): Boolean {
-        if (session == null || destroyed.get()) return false
+        if (session == null || destroyed.get() || !RuntimeArming.isArmed) return false
         val settings = AutomationConfig.read(this)
-        return sessionGate.isCurrent(currentSession(settings)) && sessionGate.isCurrent(session) &&
+        if (Build.VERSION.SDK_INT < 30 && !MediaProjectionCaptureService.isDisplayCurrent()) return false
+        return settings.enabled && sessionGate.isCurrent(currentSession(settings)) && sessionGate.isCurrent(session) &&
             isTargetForeground(settings)
     }
 
-    private fun isActionCurrent(token: ActionToken): Boolean = isSessionCurrent(token.session) &&
+    private fun isActionCurrent(token: ActionToken): Boolean = actionState.ownsAction(token) && isSessionCurrent(token.session) &&
         sessionGate.isCurrent(token)
 
     private fun syncNumberTrackerGeneration(
@@ -1175,7 +1235,7 @@ class ScreenAutomationService : AccessibilityService() {
                     configured.firstOrNull { (zone, _, target) ->
                         nodeValues.any { it.contains(target) &&
                             (!settings.numberMonitorEnabled || zone.id != settings.numberTriggerZoneId ||
-                                (node.isEnabled && isReadyClaimText(it, target))) } &&
+                                (node.isEnabled && (node.isClickable || node.actionList.any { action -> action.id == AccessibilityNodeInfo.ACTION_CLICK }) && isReadyClaimText(it, target))) } &&
                             zone.region.hasSafeClickArea(
                                 bounds.left.toFloat(),
                                 bounds.top.toFloat(),
@@ -1979,8 +2039,11 @@ class ScreenAutomationService : AccessibilityService() {
             logSwipeAction(actionId, "blocked", "reason=priority")
             return
         }
+        if (actionSession != null && !isSessionCurrent(actionSession)) return
         if (clickPending.get()) {
+            val retrySession = actionSession ?: currentSession(AutomationConfig.read(this))
             mainHandler.postDelayed({
+                if (!isSessionCurrent(retrySession)) return@postDelayed
                 scheduleSwipeUp(
                     reason = reason,
                     priority = priority,
@@ -2053,7 +2116,9 @@ class ScreenAutomationService : AccessibilityService() {
         val detectedPackage = foregroundPackage
         lastResult = "$reason；等待 ${spec.delayMs} ms 後向上滑"
         logSwipeAction(actionId, "scheduled", "priority=$priority delayMs=${spec.delayMs} package=$detectedPackage")
+        actionState.bindAction(actionToken)
         mainHandler.postDelayed({
+            if (!actionState.ownsAction(actionToken)) return@postDelayed
             val current = AutomationConfig.read(this)
             if (
                 !isActionCurrent(actionToken) ||
@@ -2129,6 +2194,11 @@ class ScreenAutomationService : AccessibilityService() {
                         // necessarily settles. Keep recognition/clicking blocked so a moving
                         // control near the bottom cannot be mistaken for the next-page target.
                         mainHandler.postDelayed({
+                            if (!actionState.ownsAction(actionToken)) return@postDelayed
+                            if (!isActionCurrent(actionToken)) {
+                                clearStaleSwipe(priority)
+                                return@postDelayed
+                            }
                             swipePending.set(false)
                             mainHandler.post(scanRunnable)
                         }, POST_SWIPE_SETTLE_MS)
@@ -2247,6 +2317,7 @@ class ScreenAutomationService : AccessibilityService() {
             actionState.cancelClick()
             return
         }
+        actionState.bindAction(actionToken)
         pendingClickZoneId = zoneId
         zoneStatuses[zoneId] = "延遲"
         syncRecognitionRegionOverlay(
@@ -2257,6 +2328,7 @@ class ScreenAutomationService : AccessibilityService() {
         val detectedPackage = foregroundPackage
         lastResult = "點擊中"
         mainHandler.postDelayed({
+            if (!actionState.ownsAction(actionToken)) return@postDelayed
             val current = AutomationConfig.read(this)
             if (
                 !isActionCurrent(actionToken) ||
@@ -2284,6 +2356,7 @@ class ScreenAutomationService : AccessibilityService() {
                     visible = isTargetForeground(current),
                 )
                 verifyImageBeforeClick(imageVerification) { verified ->
+                    if (!actionState.ownsAction(actionToken)) return@verifyImageBeforeClick
                     val latest = AutomationConfig.read(this)
                     val latestMetrics = gestureDisplayMetrics()
                     val verifiedGestureBounds = verified?.let {
@@ -2321,6 +2394,7 @@ class ScreenAutomationService : AccessibilityService() {
         imageTargetId: String?,
         actionToken: ActionToken,
     ) {
+        if (!actionState.ownsAction(actionToken)) return
         if (!isActionCurrent(actionToken) ||
             (settings.numberMonitorEnabled && settings.numberTriggerZoneId == zoneId &&
                 !actionState.canClaimReward(SystemClock.elapsedRealtime()))) {
@@ -2911,7 +2985,7 @@ class ScreenAutomationService : AccessibilityService() {
     }
 
     /** One structured log line per processed frame; filter logcat with CSC_FRAME_PROFILE. */
-    private class FrameProfile {
+    private class FrameProfile(val frameId: Long) {
         private val startedAt = SystemClock.elapsedRealtime()
         private var mainCallbackPostedAt = 0L
         private var visionQueuedAt = 0L
@@ -2957,7 +3031,7 @@ class ScreenAutomationService : AccessibilityService() {
             val templates = templateMatcherMs.entries.joinToString(",") { "${it.key}:${it.value}" }
             Log.i(
                 "CSC_FRAME_PROFILE",
-                "total=${elapsedMs()}ms capture=${captureMs}ms bitmap=${bitmapConversionMs}ms " +
+                "session=${session?.generation} frameId=$frameId total=${elapsedMs()}ms capture=${captureMs}ms bitmap=${bitmapConversionMs}ms " +
                     "fingerprint=${fingerprintMs}ms circleXQueue=${circleXQueueWaitMs}ms " +
                     "circleX=${circleXMs}ms ocr=${ocrMs}ms visualZones=[$zones] " +
                     "backArrow=[$arrows] templateMatcher=[$templates] " +

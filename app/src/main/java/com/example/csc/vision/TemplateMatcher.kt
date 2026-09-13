@@ -30,7 +30,14 @@ object TemplateMatcher {
         1.05f, 1.10f, 1.15f, 1.20f, 1.25f, 1.30f,
     )
     private val COARSE_SCALES = setOf(70, 90, 110, 130)
-    private val templateCache = WeakHashMap<Bitmap, MutableMap<Int, List<TemplateFeatures>>>()
+    private val templateCache = object : LinkedHashMap<Bitmap, MutableMap<Int, List<TemplateFeatures>>>(16, 0.75f, true) {
+        override fun removeEldestEntry(eldest: MutableMap.MutableEntry<Bitmap, MutableMap<Int, List<TemplateFeatures>>>): Boolean = size > 16
+    }
+
+    @Synchronized fun evict(reference: Bitmap) {
+        templateCache.remove(reference)
+        preferredScaleCache.remove(reference)
+    }
     private val preferredScaleCache = WeakHashMap<Bitmap, Float>()
 
     class PreparedScreen internal constructor(
@@ -171,7 +178,11 @@ object TemplateMatcher {
     @Synchronized
     private fun templatesFor(reference: Bitmap, downScale: Float): List<TemplateFeatures> {
         val scaleKey = java.lang.Float.floatToIntBits(downScale)
-        val variants = templateCache.getOrPut(reference) { mutableMapOf() }
+        val variants = templateCache.getOrPut(reference) {
+            object : LinkedHashMap<Int, List<TemplateFeatures>>(2, 0.75f, true) {
+                override fun removeEldestEntry(eldest: MutableMap.MutableEntry<Int, List<TemplateFeatures>>): Boolean = size > 2
+            }
+        }
         return variants.getOrPut(scaleKey) {
             TEMPLATE_SCALES.map { templateScale ->
                 val width = max(2, (reference.width * downScale * templateScale).roundToInt())

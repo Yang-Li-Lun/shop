@@ -9,3 +9,8 @@
 $work/*.dex
 tools/selector-fix/*.class
 tools/selector-fix/*.jar
+
+# Signing material must stay outside version control.
+*.keystore
+*.jks
+keystore.properties

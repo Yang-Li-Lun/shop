@@ -37,6 +37,7 @@ class MediaProjectionCaptureService : Service() {
     private var nextRequestId = 0L
     private var projectionGeneration = 0L
     private var pendingFrameRequest: PendingFrameRequest? = null
+    private var captureGeometry: List<Int>? = null
 
     override fun onCreate() {
         super.onCreate()
@@ -67,6 +68,9 @@ class MediaProjectionCaptureService : Service() {
     override fun onBind(intent: Intent?): IBinder? = null
 
     override fun onDestroy() {
+        running = false
+        projectionGeneration++
+        publishProjectionGeneration()
         takePendingFrameRequest()?.callback?.invoke(null)
         imageReader?.setOnImageAvailableListener(null, null)
         virtualDisplay?.release()
@@ -84,7 +88,7 @@ class MediaProjectionCaptureService : Service() {
     private fun startProjection(resultCode: Int, resultData: Intent) {
         takePendingFrameRequest()?.callback?.invoke(null)
         projectionGeneration++
-        publishProjectionGeneration(projectionGeneration)
+        publishProjectionGeneration()
         virtualDisplay?.release()
         imageReader?.close()
         projection?.stop()
@@ -96,6 +100,7 @@ class MediaProjectionCaptureService : Service() {
         val width = metrics.widthPixels
         val height = metrics.heightPixels
         val density = metrics.densityDpi
+        captureGeometry = currentGeometry()
 
         val manager = getSystemService(MediaProjectionManager::class.java)
         val mediaProjection = manager.getMediaProjection(resultCode, resultData) ?: run {
@@ -196,7 +201,31 @@ class MediaProjectionCaptureService : Service() {
             .build()
     }
 
+    @Suppress("DEPRECATION")
+    private fun currentGeometry(): List<Int> {
+        val metrics = DisplayMetrics()
+        val display = getSystemService(WindowManager::class.java).defaultDisplay
+        display.getRealMetrics(metrics)
+        return listOf(metrics.widthPixels, metrics.heightPixels, metrics.densityDpi, display.rotation)
+    }
+
+    private fun displayCurrent(): Boolean {
+        if (!running) return false
+        if (captureGeometry == currentGeometry()) return true
+        // Android 10 output is fixed-size: stop on rotation/resize and require fresh consent.
+        running = false
+        projectionGeneration++
+        publishProjectionGeneration()
+        takePendingFrameRequest()?.callback?.invoke(null)
+        stopSelf()
+        return false
+    }
+
     private fun requestFrameInternal(callback: (Bitmap?) -> Unit) {
+        if (!displayCurrent()) {
+            callback(null)
+            return
+        }
         var busy = false
         synchronized(callbackLock) {
             if (pendingFrameRequest != null) {
@@ -238,8 +267,8 @@ class MediaProjectionCaptureService : Service() {
         val callback: (Bitmap?) -> Unit,
     )
 
-    private fun publishProjectionGeneration(value: Long) {
-        projectionGenerationValue = value
+    private fun publishProjectionGeneration() {
+        projectionGenerationValue++
     }
 
     companion object {
@@ -269,6 +298,8 @@ class MediaProjectionCaptureService : Service() {
                 .setAction(ACTION_START)
                 .putExtra(EXTRA_RESULT_CODE, resultCode)
                 .putExtra(EXTRA_RESULT_DATA, resultData)
+
+        fun isDisplayCurrent(): Boolean = instance?.displayCurrent() == true
 
         fun requestFrame(callback: (Bitmap?) -> Unit) {
             val service = instance

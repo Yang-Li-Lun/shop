@@ -64,3 +64,12 @@ Android 套件識別碼為 `com.example.csc`。
 - `vision/TemplateMatcher.kt`：圖片模板比對演算法。
 - `vision/BackArrowDetector.kt`：無參考圖片的白色向左箭頭幾何偵測。
 - `GrayTemplateMatcherTest.kt`：純陣列比對核心測試。
+
+## 1.19 安全與交付補充
+
+- 首次安裝、程序冷啟動、無障礙服务重連或中斷後，需要在 CSC 手動啟用本次自動化；持久設定與預載 profile 不代表執行授權。
+- 「領取」採完整正向文字比對，倒數、完成、成功、紀錄與詳情均不視為可領取；六分鐘最低觀看與最近合格數字條件維持不變。
+- 數字上限不得小於門檻；非法舊資料會正規化。文字輸入延後 400 ms 儲存，相同值不重寫。
+- Android 10 旋轉或顯示尺寸改變時停止擷取，請回 CSC 重新授權擷取並啟用。Android 11+ 的舊座標／幀亦因顯示幾何變更失效。
+- `tools/build-release.ps1` 執行完整單元測試、Debug/Release Lint、arm64 Release/R8 建置與簽章驗證。傳入 SDK、keystore 路徑及 alias；密碼只從環境變數讀取，私鑰不得進 Git。
+- 1.19 本機升級沿用 1.18 的簽章以保留既有資料。這是 Release 建置搭配既有相容簽章，尚未遷移成獨立正式私鑰；新私鑰不能直接覆蓋既有 Android 10 安裝。

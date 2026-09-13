@@ -88,6 +88,12 @@ class MainActivity : Activity() {
     private var updatingNumberMonitorPercentInputs = false
     private val projectionAuthorizationGate = MediaProjectionAuthorizationGate()
     private val statusHandler = Handler(Looper.getMainLooper())
+    private val saveSettingsRunnable = Runnable { saveSettings() }
+    private fun scheduleSettingsSave() {
+        if (loadingUi) return
+        statusHandler.removeCallbacks(saveSettingsRunnable)
+        statusHandler.postDelayed(saveSettingsRunnable, 400L)
+    }
     private val statusRefreshRunnable = object : Runnable {
         override fun run() {
             refreshStatus()
@@ -134,6 +140,7 @@ class MainActivity : Activity() {
     }
 
     override fun onPause() {
+        saveSettings()
         statusHandler.removeCallbacks(statusRefreshRunnable)
         super.onPause()
     }
@@ -252,7 +259,7 @@ class MainActivity : Activity() {
             inputType = InputType.TYPE_CLASS_TEXT
             addTextChangedListener(object : TextWatcher {
                 override fun beforeTextChanged(s: CharSequence?, start: Int, count: Int, after: Int) = Unit
-                override fun onTextChanged(s: CharSequence?, start: Int, before: Int, count: Int) = saveSettings()
+                override fun onTextChanged(s: CharSequence?, start: Int, before: Int, count: Int) = scheduleSettingsSave()
                 override fun afterTextChanged(s: Editable?) = Unit
             })
         }
@@ -311,7 +318,7 @@ class MainActivity : Activity() {
             inputType = InputType.TYPE_CLASS_NUMBER or InputType.TYPE_NUMBER_FLAG_DECIMAL
             addTextChangedListener(object : TextWatcher {
                 override fun beforeTextChanged(s: CharSequence?, start: Int, count: Int, after: Int) = Unit
-                override fun onTextChanged(s: CharSequence?, start: Int, before: Int, count: Int) = saveSettings()
+                override fun onTextChanged(s: CharSequence?, start: Int, before: Int, count: Int) = scheduleSettingsSave()
                 override fun afterTextChanged(s: Editable?) = Unit
             })
         }
@@ -327,7 +334,7 @@ class MainActivity : Activity() {
             inputType = InputType.TYPE_CLASS_NUMBER or InputType.TYPE_NUMBER_FLAG_DECIMAL
             addTextChangedListener(object : TextWatcher {
                 override fun beforeTextChanged(s: CharSequence?, start: Int, count: Int, after: Int) = Unit
-                override fun onTextChanged(s: CharSequence?, start: Int, before: Int, count: Int) = saveSettings()
+                override fun onTextChanged(s: CharSequence?, start: Int, before: Int, count: Int) = scheduleSettingsSave()
                 override fun afterTextChanged(s: Editable?) = Unit
             })
         }
@@ -351,7 +358,7 @@ class MainActivity : Activity() {
             inputType = InputType.TYPE_CLASS_TEXT
             addTextChangedListener(object : TextWatcher {
                 override fun beforeTextChanged(s: CharSequence?, start: Int, count: Int, after: Int) = Unit
-                override fun onTextChanged(s: CharSequence?, start: Int, before: Int, count: Int) = saveSettings()
+                override fun onTextChanged(s: CharSequence?, start: Int, before: Int, count: Int) = scheduleSettingsSave()
                 override fun afterTextChanged(s: Editable?) = Unit
             })
         }
@@ -363,7 +370,7 @@ class MainActivity : Activity() {
             inputType = InputType.TYPE_CLASS_NUMBER
             addTextChangedListener(object : TextWatcher {
                 override fun beforeTextChanged(s: CharSequence?, start: Int, count: Int, after: Int) = Unit
-                override fun onTextChanged(s: CharSequence?, start: Int, before: Int, count: Int) = saveSettings()
+                override fun onTextChanged(s: CharSequence?, start: Int, before: Int, count: Int) = scheduleSettingsSave()
                 override fun afterTextChanged(s: Editable?) = Unit
             })
         }
@@ -391,7 +398,7 @@ class MainActivity : Activity() {
             inputType = InputType.TYPE_CLASS_NUMBER or InputType.TYPE_NUMBER_FLAG_DECIMAL
             addTextChangedListener(object : TextWatcher {
                 override fun beforeTextChanged(s: CharSequence?, start: Int, count: Int, after: Int) = Unit
-                override fun onTextChanged(s: CharSequence?, start: Int, before: Int, count: Int) = saveSettings()
+                override fun onTextChanged(s: CharSequence?, start: Int, before: Int, count: Int) = scheduleSettingsSave()
                 override fun afterTextChanged(s: Editable?) = Unit
             })
         }
@@ -407,7 +414,7 @@ class MainActivity : Activity() {
             inputType = InputType.TYPE_CLASS_NUMBER or InputType.TYPE_NUMBER_FLAG_DECIMAL
             addTextChangedListener(object : TextWatcher {
                 override fun beforeTextChanged(s: CharSequence?, start: Int, count: Int, after: Int) = Unit
-                override fun onTextChanged(s: CharSequence?, start: Int, before: Int, count: Int) = saveSettings()
+                override fun onTextChanged(s: CharSequence?, start: Int, before: Int, count: Int) = scheduleSettingsSave()
                 override fun afterTextChanged(s: Editable?) = Unit
             })
         }
@@ -629,7 +636,6 @@ class MainActivity : Activity() {
         }.forEach(::addZoneEditor)
         refreshNumberTriggerZoneChoices(settings.numberTriggerZoneId)
         loadingUi = false
-        saveSettings()
         refreshDailyTriggerStats()
     }
 
@@ -798,7 +804,7 @@ class MainActivity : Activity() {
 
         val watcher = object : TextWatcher {
             override fun beforeTextChanged(s: CharSequence?, start: Int, count: Int, after: Int) = Unit
-            override fun onTextChanged(s: CharSequence?, start: Int, before: Int, count: Int) = saveSettings()
+            override fun onTextChanged(s: CharSequence?, start: Int, before: Int, count: Int) = scheduleSettingsSave()
             override fun afterTextChanged(s: Editable?) = Unit
         }
         nameInput.addTextChangedListener(watcher)
@@ -904,7 +910,15 @@ class MainActivity : Activity() {
     }
 
     private fun saveSettings() {
+        statusHandler.removeCallbacks(saveSettingsRunnable)
         if (loadingUi || !::zonesContainer.isInitialized || !::thresholdSeek.isInitialized || !::backArrowThresholdSeek.isInitialized) return
+        val lower = numberMonitorThresholdInput.text.toString().replace(',', '.').toFloatOrNull()
+        val upper = numberMonitorUpperLimitInput.text.toString().replace(',', '.').toFloatOrNull()
+        if (lower == null || upper == null || !lower.isFinite() || !upper.isFinite() || lower < 0f || upper < lower) {
+            numberMonitorUpperLimitInput.error = "請輸入有效數字，上限不得低於門檻"
+            return
+        }
+        numberMonitorUpperLimitInput.error = null
         AutomationConfig.update(
             context = this,
             zones = collectZones(),
@@ -1011,6 +1025,10 @@ class MainActivity : Activity() {
         if (loadingUi) return
         saveSettings()
         if (enabled) {
+            if (numberMonitorUpperLimitInput.error != null) {
+                setSwitchWithoutCallback(false)
+                return
+            }
             val targetPackage = targetPackageInput.text.toString().trim()
             if (!isValidTargetPackage(targetPackage) || targetPackage == packageName) {
                 setSwitchWithoutCallback(false)

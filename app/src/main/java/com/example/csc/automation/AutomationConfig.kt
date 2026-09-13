@@ -762,7 +762,7 @@ object AutomationConfig {
         val preferences = context.getSharedPreferences(PREFS, Context.MODE_PRIVATE)
         synchronized(cacheLock) {
             if (cachedPreferences === preferences) {
-                cachedSettings?.let { return it }
+                cachedSettings?.let { return it.copy(enabled = it.enabled && RuntimeArming.isArmed) }
             }
         }
         val decodedZones = preferences.getString(KEY_ZONES, null)
@@ -794,10 +794,10 @@ object AutomationConfig {
                 preferences.getFloat(KEY_NUMBER_MONITOR_RIGHT, 1f),
                 preferences.getFloat(KEY_NUMBER_MONITOR_BOTTOM, 1f),
             ).normalized(),
-            numberMonitorThreshold = preferences.getFloat(KEY_NUMBER_MONITOR_THRESHOLD, 0.15f)
-                .coerceIn(0f, 999_999f),
-            numberMonitorUpperLimit = preferences.getFloat(KEY_NUMBER_MONITOR_UPPER_LIMIT, 999_999f)
-                .coerceIn(0f, 999_999f),
+            numberMonitorThreshold = normalizeNumberLimits(preferences.getFloat(KEY_NUMBER_MONITOR_THRESHOLD, 0.15f),
+                preferences.getFloat(KEY_NUMBER_MONITOR_UPPER_LIMIT, 999_999f)).first,
+            numberMonitorUpperLimit = normalizeNumberLimits(preferences.getFloat(KEY_NUMBER_MONITOR_THRESHOLD, 0.15f),
+                preferences.getFloat(KEY_NUMBER_MONITOR_UPPER_LIMIT, 999_999f)).second,
             numberColorFilterEnabled = preferences.getBoolean(KEY_NUMBER_COLOR_FILTER_ENABLED, false),
             numberColorHex = preferences.getString(KEY_NUMBER_COLOR_HEX, "#FFFFFF") ?: "#FFFFFF",
             numberColorTolerance = preferences.getInt(KEY_NUMBER_COLOR_TOLERANCE, 45).coerceIn(0, 255),
@@ -814,7 +814,7 @@ object AutomationConfig {
             cachedPreferences = preferences
             cachedSettings = settings
         }
-        return settings
+        return settings.copy(enabled = settings.enabled && RuntimeArming.isArmed)
     }
 
     private fun seedBundledProfileIfNeeded(context: Context) {
@@ -826,7 +826,7 @@ object AutomationConfig {
         val monitor = profile.optJSONObject("numberMonitorRegion") ?: JSONObject()
         val zones = profile.optJSONArray("zones") ?: JSONArray()
         preferences.edit()
-            .putBoolean(KEY_ENABLED, profile.optBoolean("enabled", false))
+            .putBoolean(KEY_ENABLED, false)
             .putString(KEY_TARGET_PACKAGE, profile.optString("targetPackage", DEFAULT_TARGET_PACKAGE).trim())
             .putString(KEY_ZONES, zones.toString())
             .putFloat(KEY_THRESHOLD, profile.optDouble("matchThreshold", 0.8).toFloat())
@@ -878,30 +878,45 @@ object AutomationConfig {
         observationOnly: Boolean = false,
     ) {
         val safeZones = zones.map(RecognitionZone::normalized).take(MAX_ZONES)
-        context.getSharedPreferences(PREFS, Context.MODE_PRIVATE).edit()
-            .putString(KEY_ZONES, encodeZones(safeZones))
-            .putString(KEY_TARGET_PACKAGE, targetPackage.trim())
-            .putFloat(KEY_THRESHOLD, matchThreshold.coerceIn(0.55f, 0.99f))
-            .putFloat(KEY_CIRCLE_X_THRESHOLD, circleXThreshold.coerceIn(0.50f, 0.99f))
-            .putFloat(KEY_BACK_ARROW_THRESHOLD, backArrowThreshold.coerceIn(0.50f, 0.99f))
-            .putLong(KEY_COOLDOWN, clickCooldownMs.coerceIn(1_000L, 15_000L))
-            .putBoolean(KEY_SHOW_CLICK_MARKER, showClickMarker)
-            .putLong(KEY_RANDOM_CLICK_MAX, randomClickMaxMs.coerceIn(100L, 3_000L))
-            .putBoolean(KEY_NUMBER_MONITOR_ENABLED, numberMonitorEnabled)
-            .putFloat(KEY_NUMBER_MONITOR_LEFT, numberMonitorRegion.normalized().left)
-            .putFloat(KEY_NUMBER_MONITOR_TOP, numberMonitorRegion.normalized().top)
-            .putFloat(KEY_NUMBER_MONITOR_RIGHT, numberMonitorRegion.normalized().right)
-            .putFloat(KEY_NUMBER_MONITOR_BOTTOM, numberMonitorRegion.normalized().bottom)
-            .putFloat(KEY_NUMBER_MONITOR_THRESHOLD, numberMonitorThreshold.coerceIn(0f, 999_999f))
-            .putFloat(KEY_NUMBER_MONITOR_UPPER_LIMIT, numberMonitorUpperLimit.coerceIn(0f, 999_999f))
-            .putBoolean(KEY_NUMBER_COLOR_FILTER_ENABLED, numberColorFilterEnabled)
-            .putString(KEY_NUMBER_COLOR_HEX, numberColorHex.trim().uppercase().take(9))
-            .putInt(KEY_NUMBER_COLOR_TOLERANCE, numberColorTolerance.coerceIn(0, 255))
-            .putLong(KEY_NUMBER_ABSENCE_TIMEOUT, numberAbsenceTimeoutMs.coerceIn(500L, 30_000L))
-            .putString(KEY_NUMBER_TRIGGER_ZONE, encodeNumberTriggerZoneId(numberTriggerZoneId))
-            .putLong(KEY_NUMBER_TRIGGER_DELAY, numberTriggerDelayMs.coerceIn(0L, 30_000L))
-            .putBoolean(KEY_OBSERVATION_ONLY, observationOnly)
-            .apply()
+        val values = mapOf<String, Any>(
+            KEY_ZONES to encodeZones(safeZones),
+            KEY_TARGET_PACKAGE to targetPackage.trim(),
+            KEY_THRESHOLD to matchThreshold.coerceIn(0.55f, 0.99f),
+            KEY_CIRCLE_X_THRESHOLD to circleXThreshold.coerceIn(0.50f, 0.99f),
+            KEY_BACK_ARROW_THRESHOLD to backArrowThreshold.coerceIn(0.50f, 0.99f),
+            KEY_COOLDOWN to clickCooldownMs.coerceIn(1_000L, 15_000L),
+            KEY_SHOW_CLICK_MARKER to showClickMarker,
+            KEY_RANDOM_CLICK_MAX to randomClickMaxMs.coerceIn(100L, 3_000L),
+            KEY_NUMBER_MONITOR_ENABLED to numberMonitorEnabled,
+            KEY_NUMBER_MONITOR_LEFT to numberMonitorRegion.normalized().left,
+            KEY_NUMBER_MONITOR_TOP to numberMonitorRegion.normalized().top,
+            KEY_NUMBER_MONITOR_RIGHT to numberMonitorRegion.normalized().right,
+            KEY_NUMBER_MONITOR_BOTTOM to numberMonitorRegion.normalized().bottom,
+            KEY_NUMBER_MONITOR_THRESHOLD to normalizeNumberLimits(numberMonitorThreshold, numberMonitorUpperLimit).first,
+            KEY_NUMBER_MONITOR_UPPER_LIMIT to normalizeNumberLimits(numberMonitorThreshold, numberMonitorUpperLimit).second,
+            KEY_NUMBER_COLOR_FILTER_ENABLED to numberColorFilterEnabled,
+            KEY_NUMBER_COLOR_HEX to numberColorHex.trim().uppercase().take(9),
+            KEY_NUMBER_COLOR_TOLERANCE to numberColorTolerance.coerceIn(0, 255),
+            KEY_NUMBER_ABSENCE_TIMEOUT to numberAbsenceTimeoutMs.coerceIn(500L, 30_000L),
+            KEY_NUMBER_TRIGGER_ZONE to encodeNumberTriggerZoneId(numberTriggerZoneId),
+            KEY_NUMBER_TRIGGER_DELAY to numberTriggerDelayMs.coerceIn(0L, 30_000L),
+            KEY_OBSERVATION_ONLY to observationOnly,
+        )
+        val preferences = context.getSharedPreferences(PREFS, Context.MODE_PRIVATE)
+        val previous = preferences.all
+        val changed = values.filter { (key, value) -> previous[key] != value }
+        if (changed.isEmpty()) return
+        val editor = preferences.edit()
+        changed.forEach { (key, value) ->
+            when (value) {
+                is String -> editor.putString(key, value)
+                is Boolean -> editor.putBoolean(key, value)
+                is Float -> editor.putFloat(key, value)
+                is Int -> editor.putInt(key, value)
+                is Long -> editor.putLong(key, value)
+            }
+        }
+        editor.apply()
         invalidate(context)
     }
 
@@ -1019,6 +1034,7 @@ object AutomationConfig {
     }
 
     fun setEnabled(context: Context, enabled: Boolean) {
+        RuntimeArming.setArmed(enabled)
         context.getSharedPreferences(PREFS, Context.MODE_PRIVATE).edit()
             .putBoolean(KEY_ENABLED, enabled)
             .apply()
@@ -1060,6 +1076,8 @@ object AutomationConfig {
 /** A countdown or already-claimed label is not an available claim action. */
 internal fun isReadyClaimText(text: String, target: String): Boolean {
     val value = java.text.Normalizer.normalize(text, java.text.Normalizer.Form.NFKC).filterNot(Char::isWhitespace)
-    return value.contains(target.filterNot(Char::isWhitespace)) &&
-        !Regex("[0-9]+[:：分秒]|後|后|等待|已領|已领|倒數|倒数").containsMatchIn(value)
+    val expected = java.text.Normalizer.normalize(target, java.text.Normalizer.Form.NFKC).filterNot(Char::isWhitespace)
+    if (expected.isBlank()) return false
+    if (Regex("[0-9]|後|后|等待|已領|已领|倒數|倒数|成功|完成|紀錄|记录|詳情|详情").containsMatchIn(value)) return false
+    return value in setOf(expected, "立即$expected", "點擊$expected", "点击$expected", "馬上$expected", "马上$expected")
 }

@@ -16,6 +16,34 @@ enum class AutomationPhase {
 class ActionStateMachine {
     private val phaseRef = AtomicReference(AutomationPhase.IDLE)
 
+    private var actionOwner: ActionToken? = null
+    @Synchronized fun bindAction(token: ActionToken) { actionOwner = token }
+    @Synchronized fun ownsAction(token: ActionToken): Boolean = actionOwner == token
+
+    private var frameSequence = 0L
+    private var activeFrameId: Long? = null
+    private var latestAppliedFrameId = 0L
+
+    val isRecognitionInFlight: Boolean @Synchronized get() = activeFrameId != null
+
+    @Synchronized fun startRecognitionFrame(): Long? {
+        if (activeFrameId != null || !tryStartRecognition()) return null
+        return (++frameSequence).also { activeFrameId = it }
+    }
+
+    @Synchronized fun isFrameCurrent(frameId: Long): Boolean =
+        activeFrameId == frameId && frameId > latestAppliedFrameId
+
+    @Synchronized fun finishRecognitionFrame(frameId: Long): Boolean {
+        if (!isFrameCurrent(frameId)) return false
+        latestAppliedFrameId = frameId
+        activeFrameId = null
+        recognitionFinished()
+        return true
+    }
+
+    @Synchronized fun invalidateRecognition() { activeFrameId = null }
+
     private var pageStartedAt: Long? = null
     private var qualifyingNumberAt: Long? = null
 
@@ -89,7 +117,9 @@ class ActionStateMachine {
         phaseRef.set(if (cooldown) AutomationPhase.COOLDOWN else AutomationPhase.IDLE)
     }
 
-    fun cancel() {
+    @Synchronized fun cancel() {
+        actionOwner = null
+        activeFrameId = null
         phaseRef.set(AutomationPhase.IDLE)
     }
 
