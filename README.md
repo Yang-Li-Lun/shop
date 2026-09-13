@@ -73,3 +73,6 @@ Android 套件識別碼為 `com.example.csc`。
 - Android 10 旋轉或顯示尺寸改變時停止擷取，請回 CSC 重新授權擷取並啟用。Android 11+ 的舊座標／幀亦因顯示幾何變更失效。
 - `tools/build-release.ps1` 執行完整單元測試、Debug/Release Lint、arm64 Release/R8 建置與簽章驗證。傳入 SDK、keystore 路徑及 alias；密碼只從環境變數讀取，私鑰不得進 Git。
 - 1.19 本機升級沿用 1.18 的簽章以保留既有資料。這是 Release 建置搭配既有相容簽章，尚未遷移成獨立正式私鑰；新私鑰不能直接覆蓋既有 Android 10 安裝。
+## 1.20 Release 修正
+
+1.19 的 Release 最佳化移除了 ML Kit 反射註冊器的 public 建構子，實际 OCR 初始化會崩潰；請使用 1.20。1.20 保留這些建構子，並通過在實際 minified Release APK 上執行的中英文 OCR 初始化檢查。歷史 1.19 APK／tag 僅保留供追溯。

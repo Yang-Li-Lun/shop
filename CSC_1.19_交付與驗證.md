@@ -48,3 +48,6 @@
 - 狀態機採文檔的漸進遷移，已移除 processing；clickPending、swipePending、prioritySwipePending 的完整移除與 Service controllers 拆分尚未完成。
 - matching 預篩／round-robin frame budget、block-average fingerprint、完整 structured event log、SeekBar／region 拖曳的專用節流、backup／商店發布政策均未變更。
 - 以上長期項目需各自完成測試與裝置比較，不能由本次 Release build 成功推定完成。
+## 後續實機發現（12:19）
+
+使用者重新授權後，1.19 完成首次上滑，但 OCR 初始化發生崩潰。Release R8 刪除了三個 manifest 反射註冊器的 public 無參數建構子；consumer rule 只保留 class，未保留 constructor。此前「啟動未崩潰」僅適用主畫面，不代表 OCR 可用。1.19 不作為最終可用版本，保留此 APK／tag 供追溯，修復由 1.20 交付。
