@@ -4,7 +4,13 @@ CSC 是一個 Android 10+ 的本機多區域螢幕辨識／自動點擊工具。
 
 Android 套件識別碼為 `com.example.csc`。
 
-目前交付版本為 **1.18**：數字區獨立放大 OCR、指定字色與背景隔離、小數點像素補驗及不完整數字保護；領取流程至少觀看六分鐘，持續等到可領取按鈕出現（可能七、八分鐘或更久）後才點擊，換頁重新計時。保留既有設定與 session／手勢保護。驗證結果與限制見 [1.18 驗證紀錄](docs/verification/CSC-1.18.md)；前版見 [1.17 驗證紀錄](docs/verification/CSC-1.17.md)。對應原始碼標籤為 `v1.18`。
+目前交付版本為 **1.21**（`versionCode 22`，僅 `arm64-v8a`），對應原始碼標籤 [`v1.21`](https://github.com/Yang-Li-Lun/shop/tree/v1.21)。主畫面與辨識浮窗統一顯示「今日 N 次」，保留既有三日統計資料；並包含 1.20 的 Release OCR 初始化修正與 1.19 的手動啟用、非同步安全保護。
+
+- [下載 CSC 1.21 APK](https://github.com/Yang-Li-Lun/shop/raw/refs/heads/main/APK/CSC-1.21-arm64-v8a.apk)
+- [1.21 交付與驗證紀錄](docs/CSC-1.21-validation.md)
+- [歷版 APK](APK)／[歷史驗證文件](docs/verification)
+
+1.21 交付紀錄包含 126 項 JVM 測試、Debug／Release Lint、Release OCR 初始化及 Android 10 實機浮窗繪製檢查；尚未完成此版本的蝦皮領取／換頁端到端驗證、跨午夜長時間觀察與 Android 11+ 截圖路徑實機驗證。統計只代表有效優先上滑完成次數，不代表獎勵已入帳。
 
 ## 功能
 
@@ -38,7 +44,10 @@ Android 套件識別碼為 `com.example.csc`。
 2. 依 `AGENTS.md` 設定 repository-local `jdk.net.unixdomain.tmpdir`，執行 `./gradlew --no-daemon assembleDebug -PtargetAbi=arm64-v8a`（Windows 使用 `gradlew.bat`）。
 3. 安裝 `app/build/outputs/apk/debug/app-debug.apk`。
 4. 首次開啟後按「開啟無障礙服務」，選擇「CSC 螢幕辨識」並允許。
-5. 輸入文字或選擇參考圖片，開啟「啟用自動辨識」，再切換到目標 App。
+5. 設定目標 App、辨識區域及文字／參考圖片；使用數字監控時，設定數字區域與合格範圍。
+6. 手動開啟「啟用自動辨識」；Android 10 須在系統對話框同意螢幕擷取，再切換到目標 App。
+
+也可直接安裝上方提供的 1.21 APK。升級時使用相容簽章覆蓋安裝以保留設定；Android 可能清除無障礙與螢幕擷取授權，請重新授權並手動啟用。
 
 ## 參考圖片建議
 
@@ -65,14 +74,25 @@ Android 套件識別碼為 `com.example.csc`。
 - `vision/BackArrowDetector.kt`：無參考圖片的白色向左箭頭幾何偵測。
 - `GrayTemplateMatcherTest.kt`：純陣列比對核心測試。
 
-## 1.19 安全與交付補充
+## 安全啟用與交付說明（1.19 起）
 
-- 首次安裝、程序冷啟動、無障礙服务重連或中斷後，需要在 CSC 手動啟用本次自動化；持久設定與預載 profile 不代表執行授權。
+- 首次安裝、程序冷啟動、無障礙服務重連或中斷後，需要在 CSC 手動啟用本次自動化；持久設定與預載 profile 不代表執行授權。
+- 每輪上滑進入新直播頁後重新計時，至少觀看六分鐘；按鈕晚出現時繼續等待，可能七～九分鐘或更久。領取點擊完成後依設定等待再上滑；未偵測到指定數字時，須經安全的重新確認流程才換頁。
 - 「領取」採完整正向文字比對，倒數、完成、成功、紀錄與詳情均不視為可領取；六分鐘最低觀看與最近合格數字條件維持不變。
 - 數字上限不得小於門檻；非法舊資料會正規化。文字輸入延後 400 ms 儲存，相同值不重寫。
 - Android 10 旋轉或顯示尺寸改變時停止擷取，請回 CSC 重新授權擷取並啟用。Android 11+ 的舊座標／幀亦因顯示幾何變更失效。
 - `tools/build-release.ps1` 執行完整單元測試、Debug/Release Lint、arm64 Release/R8 建置與簽章驗證。傳入 SDK、keystore 路徑及 alias；密碼只從環境變數讀取，私鑰不得進 Git。
 - 1.19 本機升級沿用 1.18 的簽章以保留既有資料。這是 Release 建置搭配既有相容簽章，尚未遷移成獨立正式私鑰；新私鑰不能直接覆蓋既有 Android 10 安裝。
-## 1.20 Release 修正
 
-1.19 的 Release 最佳化移除了 ML Kit 反射註冊器的 public 建構子，實际 OCR 初始化會崩潰；請使用 1.20。1.20 保留這些建構子，並通過在實際 minified Release APK 上執行的中英文 OCR 初始化檢查。歷史 1.19 APK／tag 僅保留供追溯。
+## 版本修正紀錄
+
+| 版本 | 主要變更 | 驗證紀錄 |
+| --- | --- | --- |
+| **1.21** | 主畫面與辨識浮窗只顯示今日統計；與辨識範圍或狀態標籤重疊時隱藏面板。 | [交付與限制](docs/CSC-1.21-validation.md) |
+| 1.20 | 修正 Release/R8 移除 ML Kit 反射註冊器 public 建構子造成的 OCR 初始化崩潰。 | [交付與驗證](docs/verification/CSC_1.20_交付與驗證.md) |
+| 1.19 | 手動啟用授權、舊回呼失效、領取文字完整比對、數字範圍正規化與顯示幾何保護。 | [歷史修正紀錄](docs/verification/CSC_1.19_交付與驗證.md) |
+| 1.18 | 數字區獨立放大 OCR、指定字色與背景隔離、小數點像素補驗及不完整數字保護。 | [驗證紀錄](docs/verification/CSC-1.18.md) |
+
+1.19 有 Release OCR 初始化崩潰問題，歷史 APK／tag 僅保留追溯，請安裝目前的 1.21。1.20 與 1.21 的 minified Release 均有中英文 OCR 初始化檢查紀錄。
+
+目前交付的 Release APK 沿用既有 Android Debug certificate，以相容簽章覆蓋安裝並保留資料，尚未遷移為獨立正式私鑰。更換私鑰的 APK 無法直接覆蓋既有安裝；Release 最佳化建置不代表已完成正式簽章遷移。
